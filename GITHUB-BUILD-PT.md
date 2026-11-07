@@ -7,4 +7,4 @@
 
 O workflow prepara o compilador MSVC x86 no runner Windows e descarrega a fonte SKSE LE 1.7.3 do site oficial do SKSE para satisfazer as dependências de build.
 
-O workflow só compila e publica o artifact. Não executa Skyrim nem valida o modelo renderizado no jogo. Usa `PREVIEW-PROBE.md` para o teste M1 e para localizar o BMP de diagnóstico.
+O workflow só compila e publica o artifact. Não executa Skyrim nem valida o modelo renderizado no jogo. Usa `PREVIEW-PROBE.md` para testar a captura ao abrir o wheel com M3 e para localizar os BMPs numerados de diagnóstico.

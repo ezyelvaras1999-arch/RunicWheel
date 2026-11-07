@@ -65,6 +65,8 @@ IMPORT UInit W GetTempPathA(UInit,char*);
 IMPORT UInit W GetModuleFileNameA(Handle,char*,UInit);
 IMPORT Long W GetModuleHandleExA(DWord,const char*,Handle*);
 IMPORT Handle W CreateFileA(const char*,DWord,DWord,void*,DWord,DWord,Handle);
+IMPORT Long W CreateDirectoryA(const char*,void*);
+IMPORT DWord W GetLastError();
 IMPORT Long W WriteFile(Handle,const void*,DWord,DWord*,void*);
 IMPORT Long W ReadFile(Handle,void*,DWord,DWord*,void*);
 IMPORT Long W CloseHandle(Handle);
@@ -179,6 +181,8 @@ static Raw g_atlasOwner=nullptr;
 static int g_iconAtlasChecked=0;
 static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
+static volatile Long g_previewSequence=0;
+static char g_previewDirectory[260]{};
 static int g_firstThemeEnabled=1;
 static volatile Long g_feedback=0, g_feedbackTick=0;
 // Only these timestamps/flags cross input and Present threads. No TESV calls during rendering.
@@ -1429,7 +1433,9 @@ void load_config(){
     if(!g_enableSpellActions)file_log("RunicWheelLE: native spell actions explicitly disabled by INI\r\n");
     if(!g_hoverCaptureEnabled)file_log("RunicWheelLE: UI task disabled by config\r\n");
     g_inventoryPreviewCapture=GetPrivateProfileIntA("Debug","CaptureInventoryPreview",0,g_configPath)?1:0;
-    if(g_inventoryPreviewCapture)file_log("RunicWheelLE: isolated inventory-model capture ENABLED (M1 only)\r\n");
+    GetPrivateProfileStringA("Debug","PreviewCaptureDirectory",
+        "C:\\Users\\HP\\Pictures\\Skyrim\\RunicWheelLE",g_previewDirectory,sizeof(g_previewDirectory),g_configPath);
+    if(g_inventoryPreviewCapture)file_log("RunicWheelLE: isolated inventory-model capture ENABLED (M3 wheel-open trigger)\r\n");
     if(!g_enableSlowTime)file_log("RunicWheelLE: slow-time disabled by 100 percent speed setting\r\n");
     load_catalog();
     rw04::State legacy{};
@@ -1594,7 +1600,7 @@ void advanced_action(unsigned gesture,bool primary){
        "RunicWheelLE: ADVANCED EDIT armed/cancelled/refused (no TESV mutation)\r\n");
 }
 
-void edit_click(bool remove,bool mouseCapture=false){
+void edit_click(bool remove){
     if(!inventory_context())return;
     // Never consume an old hovered item from another menu or expired frame.
     const UiPick pick=read_ui_pick();
@@ -1626,12 +1632,6 @@ void edit_click(bool remove,bool mouseCapture=false){
         "RunicWheelLE: EDIT remove from selected slot\r\n":
         "RunicWheelLE: EDIT add hovered item to selected slot\r\n");}
     else file_log("RunicWheelLE: edit refused (no item, duplicate or sector full)\r\n");
-    if(!remove&&mouseCapture&&form&&g_inventoryPreviewCapture){
-        InterlockedExchange(&g_previewCaptureForm,(Long)form);
-        InterlockedExchange(&g_previewCaptureAttempts,0);
-        InterlockedExchange(&g_previewCapturePending,1);
-        file_log("RunicWheelLE: M1 queued isolated 3D preview capture/update\r\n");
-    }
 }
 
 static bool resolve_saved_form(unsigned saved,unsigned* out,void* context){
@@ -1709,6 +1709,19 @@ void change_visible(bool visible){
         file_log(visible?"RunicWheelLE: input -> wheel OPEN\r\n":"RunicWheelLE: input -> wheel CLOSED\r\n");
     }
 }
+void queue_open_preview_capture(){
+    if(!g_inventoryPreviewCapture || !inventory_context())return;
+    const DWord form=(DWord)InterlockedCompareExchange(&g_uiHover,0,0);
+    const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
+    if(!form || !seen || GetTickCount()-seen>500u){
+        file_log("RunicWheelLE: M3 opened in Inventory but no fresh hovered FormID; preview not queued\r\n");
+        return;
+    }
+    InterlockedExchange(&g_previewCaptureForm,(Long)form);
+    InterlockedExchange(&g_previewCaptureAttempts,0);
+    InterlockedExchange(&g_previewCapturePending,1);
+    file_log("RunicWheelLE: M3 queued isolated 3D preview capture for hovered FormID\r\n");
+}
 void activate(bool down){
     bool was=g_activation.visible;
     bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
@@ -1716,7 +1729,10 @@ void activate(bool down){
         InterlockedExchange(&g_openPresentMark,InterlockedCompareExchange(&g_presentCalls,0,0));
         InterlockedExchange(&g_presentWatchLogged,0);}
     if(was!=now)change_visible(now);
-    if(!was && now)InterlockedExchange(&g_refreshNeeded,1);
+    if(!was && now){
+        InterlockedExchange(&g_refreshNeeded,1);
+        queue_open_preview_capture();
+    }
 }
 void close_wheel(){
     const bool was=g_activation.visible;
@@ -1811,7 +1827,7 @@ int process_event(InputEvent* event){
                 g_actionFlash=1;
                 if(inventory_context()){
                     if(g_enableAdvancedEditor && g_modifiers.gesture()!=rw21::Plain)advanced_action(g_modifiers.gesture(),true);
-                    else edit_click(false,true);
+                    else edit_click(false);
                 }else log_action(g_cfg.leftClickRightHand?"RIGHT":"LEFT");
             }
             if(mouse && b->scan==(DWord)g_cfg.secondaryMouse){
@@ -2788,17 +2804,43 @@ void append_hex(char* buf,unsigned& n,DWord v){
 }
 void put_u16(unsigned char* p,unsigned v){p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);}
 void put_u32(unsigned char* p,DWord v){p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);p[2]=(unsigned char)(v>>16);p[3]=(unsigned char)(v>>24);}
-int preview_probe_path(char* out,UInit cap){
-    if(!out||cap<64||!g_fallbackLogPath[0])return 0;
-    UInit end=0,last=0;
-    while(g_fallbackLogPath[end]&&end<sizeof(g_fallbackLogPath)-1){
-        if(g_fallbackLogPath[end]=='\\'||g_fallbackLogPath[end]=='/')last=end+1;
-        ++end;
+int create_directory_tree(const char* directory){
+    char path[260]{};UInit n=0;
+    while(directory[n]&&n<sizeof(path)-1){path[n]=directory[n];++n;}
+    if(!n||n>=sizeof(path)-1||path[1]!=':'||path[2]!='\\')return 0;
+    path[n]=0;
+    for(UInit i=3;i<=n;++i){
+        if(path[i]=='\\'||path[i]=='/'||path[i]==0){
+            const char saved=path[i];path[i]=0;
+            const int made=CreateDirectoryA(path,nullptr)!=0;
+            const DWord error=made?0:GetLastError();
+            path[i]=saved;
+            if(!made&&error!=183u)return 0; // ERROR_ALREADY_EXISTS
+        }
     }
-    const char name[]="RunicWheelLE-preview.bmp";
-    if(!last||last+sizeof(name)>=cap)return 0;
-    for(UInit i=0;i<last;++i)out[i]=g_fallbackLogPath[i];
-    for(UInit i=0;i<sizeof(name);++i)out[last+i]=name[i];
+    return 1;
+}
+int ensure_preview_directory(){
+    if(create_directory_tree(g_previewDirectory))return 1;
+    char temp[200]{};const UInit length=GetTempPathA(sizeof(temp),temp);
+    if(!length||length>=sizeof(temp))return 0;
+    UInit n=length;
+    if(n&&temp[n-1]!='\\'&&temp[n-1]!='/')temp[n++]='\\';
+    const char* suffix="RunicWheelLE\\Previews";
+    for(UInit i=0;suffix[i]&&n<sizeof(temp)-1;++i)temp[n++]=suffix[i];
+    if(n>=sizeof(temp)-1)return 0;temp[n]=0;
+    for(UInit i=0;i<=n;++i)g_previewDirectory[i]=temp[i];
+    file_log("RunicWheelLE: requested preview folder unavailable; using TEMP\\RunicWheelLE\\Previews\r\n");
+    return create_directory_tree(g_previewDirectory);
+}
+int preview_probe_path(char* out,UInit cap,DWord sequence){
+    if(!out||!cap||!g_previewDirectory[0])return 0;
+    UInit n=0;while(g_previewDirectory[n]&&n<sizeof(g_previewDirectory)-1){if(n+1>=cap)return 0;out[n]=g_previewDirectory[n];++n;}
+    if(n+1>=cap)return 0;
+    if(n&&out[n-1]!='\\'&&out[n-1]!='/')out[n++]='\\';
+    const char* prefix="RunicWheelLE-preview-";while(*prefix){if(n+1>=cap)return 0;out[n++]=*prefix++;}
+    DWord div=1000000u;for(int i=0;i<6;++i){if(n+1>=cap)return 0;out[n++]=(char)('0'+(sequence/div)%10u);div/=10u;}
+    const char* ext=".bmp";while(*ext){if(n+1>=cap)return 0;out[n++]=*ext++;}out[n]=0;
     return 1;
 }
 int save_surface_bmp(Raw surface,DWord width,DWord height,DWord format,DWord formId){
@@ -2815,9 +2857,16 @@ int save_surface_bmp(Raw surface,DWord width,DWord height,DWord format,DWord for
     }
     char path[320]{};
     int saved=0;
-    if(preview_probe_path(path,sizeof(path))){
-        Handle file=CreateFileA(path,0x40000000u,0,nullptr,2,0x80,nullptr);
-        if(file!=(Handle)(-1)){
+    if(ensure_preview_directory()){
+      for(unsigned attempt=0;attempt<1000&&!saved;++attempt){
+        const DWord sequence=(DWord)InterlockedIncrement(&g_previewSequence);
+        if(!preview_probe_path(path,sizeof(path),sequence))break;
+        Handle file=CreateFileA(path,0x40000000u,0,nullptr,1,0x80,nullptr); // CREATE_NEW: never overwrite
+        if(file==(Handle)(-1)){
+            const DWord error=GetLastError();
+            if(error==80u||error==183u)continue; // name already exists; take next sequence
+            break;
+        }else{
             unsigned char header[54]{};
             header[0]='B';header[1]='M';
             put_u32(header+2,54u+imageBytes);put_u32(header+10,54u);
@@ -2833,39 +2882,49 @@ int save_surface_bmp(Raw surface,DWord width,DWord height,DWord format,DWord for
             }
             CloseHandle(file);
         }
+      }
     }
     reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
     if(saved){
-        char msg[150]{};unsigned n=0;
+        char msg[480]{};unsigned n=0;
         const char* prefix="RunicWheelLE: isolated preview candidate written, FormID=";
         while(*prefix)msg[n++]=*prefix++;
         append_hex(msg,n,formId);
-        const char* suffix=" file=TEMP\\RunicWheelLE-preview.bmp\r\n";
-        while(*suffix)msg[n++]=*suffix++;
+        const char* suffix=" file=";while(*suffix)msg[n++]=*suffix++;
+        for(UInit i=0;path[i]&&n<sizeof(msg)-4;++i)msg[n++]=path[i];
+        msg[n++]='\r';msg[n++]='\n';
         msg[n]=0;file_log(msg);
     }
     return saved;
 }
-bool inventory3d_model_matches(DWord wanted,Raw* managerOut=nullptr){
+bool inventory3d_model_matches(DWord wanted,Raw* managerOut=nullptr,unsigned* rowOut=nullptr){
     // SKSE LE 1.7.3 GameMenus.h: singleton 0x01B2E99C, seven 0x14-byte
-    // ItemData rows at +0x44, count at +0xD0. Wait for a single settled model.
+    // ItemData rows at +0x44, count at +0xD0. Match the selected FormID in any row.
     if(!wanted||!readable((Raw)0x01B2E99C,4,0))return false;
     Raw manager=*(Raw*)0x01B2E99C;
     if(!readable(manager,0xD4,0))return false;
     const DWord count=*(const DWord*)((const unsigned char*)manager+0xD0);
-    if(count!=1)return false;
-    const unsigned char* row=(const unsigned char*)manager+0x44;
-    if(!readable(row,0x14,0))return false;
-    Raw model=*(Raw const*)(row+8);
-    if(!readable(model,4,0))return false;
-    for(unsigned offset=0;offset<=4;offset+=4){
-        Raw form=*(Raw const*)(row+offset);
-        if(readable(form,0x10,0)&&*(const DWord*)((const unsigned char*)form+0x0C)==wanted){
-            if(managerOut)*managerOut=manager;
-            return true;
+    if(!count||count>7)return false;
+    const unsigned char* rows=(const unsigned char*)manager+0x44;
+    unsigned matchCount=0,matchIndex=0;
+    for(unsigned i=0;i<count;++i){
+        const unsigned char* row=rows+i*0x14;
+        if(!readable(row,0x14,0))return false;
+        Raw model=*(Raw const*)(row+8);
+        if(!readable(model,4,0))continue;
+        bool rowMatches=false;
+        for(unsigned offset=0;offset<=4;offset+=4){
+            Raw form=*(Raw const*)(row+offset);
+            if(readable(form,0x10,0)&&*(const DWord*)((const unsigned char*)form+0x0C)==wanted){
+                rowMatches=true;
+            }
         }
+        if(rowMatches){matchCount++;matchIndex=i;}
     }
-    return false;
+    if(matchCount!=1)return false;
+    if(managerOut)*managerOut=manager;
+    if(rowOut)*rowOut=matchIndex;
+    return true;
 }
 void capture_inventory_preview_probe(Raw device){
     if(!device||!g_inventoryPreviewCapture||
@@ -2876,21 +2935,15 @@ void capture_inventory_preview_probe(Raw device){
         return;
     }
     const DWord formId=(DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0);
-    const DWord hover=(DWord)InterlockedCompareExchange(&g_uiHover,0,0);
     const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
     const DWord now=GetTickCount();
     if(!formId)return;
-    if(hover!=formId){
-        InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: isolated preview capture cancelled (hover changed)\r\n");
-        return;
-    }
     if(!seen||now-seen>1500)return;
-    Raw manager=nullptr;
-    if(!inventory3d_model_matches(formId,&manager)){
+    Raw manager=nullptr;unsigned rowIndex=0;
+    if(!inventory3d_model_matches(formId,&manager,&rowIndex)){
         if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
             InterlockedExchange(&g_previewCapturePending,0);
-            file_log("RunicWheelLE: M1 preview timed out waiting for one matching inventory model\r\n");
+            file_log("RunicWheelLE: preview timed out waiting for a matching loaded inventory model\r\n");
         }
         return;
     }
@@ -2917,7 +2970,9 @@ void capture_inventory_preview_probe(Raw device){
         file_log("RunicWheelLE: isolated preview setup failed before touching the backbuffer\r\n");
         drop(state);drop(captured);drop(original);drop(back);return;
     }
-    int backChanged=0,scene=0,captureReady=0,restoreReady=1;
+    int backChanged=0,scene=0,captureReady=0,restoreReady=1,managerIsolated=0;
+    DWord savedItemCount=0;
+    unsigned char savedItems[7*0x14]{};
     UInt32 rendered=0;
     __try {
         hr=reinterpret_cast<GetRenderTargetData>(get(device,kGetRenderTargetData))(device,back,original);
@@ -2929,7 +2984,16 @@ void capture_inventory_preview_probe(Raw device){
             hr=reinterpret_cast<Scene>(get(device,kBeginScene))(device);
             if(succeeded(hr)){
                 scene=1;
+                unsigned char* items=(unsigned char*)manager+0x44;
+                savedItemCount=*(DWord*)((unsigned char*)manager+0xD0);
+                for(unsigned i=0;i<sizeof(savedItems);++i)savedItems[i]=items[i];
+                managerIsolated=1;
+                for(unsigned i=0;i<0x14;++i)items[i]=savedItems[rowIndex*0x14+i];
+                *(DWord*)((unsigned char*)manager+0xD0)=1;
                 rendered=reinterpret_cast<Inventory3DRender>(0x00867730u)(manager);
+                for(unsigned i=0;i<sizeof(savedItems);++i)items[i]=savedItems[i];
+                *(DWord*)((unsigned char*)manager+0xD0)=savedItemCount;
+                managerIsolated=0;
                 hr=reinterpret_cast<Scene>(get(device,kEndScene))(device);
                 scene=0;
             }
@@ -2939,6 +3003,11 @@ void capture_inventory_preview_probe(Raw device){
             }
         }
     }__finally{
+        if(managerIsolated){
+            unsigned char* items=(unsigned char*)manager+0x44;
+            for(unsigned i=0;i<sizeof(savedItems);++i)items[i]=savedItems[i];
+            *(DWord*)((unsigned char*)manager+0xD0)=savedItemCount;
+        }
         if(scene)reinterpret_cast<Scene>(get(device,kEndScene))(device);
         if(backChanged){
             const HResult restoreHr=reinterpret_cast<UpdateSurface>(get(device,kUpdateSurface))
@@ -2950,7 +3019,7 @@ void capture_inventory_preview_probe(Raw device){
     }
     if(captureReady&&restoreReady&&save_surface_bmp(captured,desc.width,desc.height,desc.format,formId)){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: M1 isolated inventory model captured over magenta; original frame restored\r\n");
+        file_log("RunicWheelLE: M3 isolated inventory model capture saved over magenta; original frame restored\r\n");
         if(g_cfg.inputDiagnostics){
             char msg[120]{};unsigned n=0;
             const char* prefix="RunicWheelLE: Inventory3DManager::Render returned ";
@@ -2963,7 +3032,7 @@ void capture_inventory_preview_probe(Raw device){
         file_log("RunicWheelLE: CRITICAL isolated preview restore failed; capture cancelled\r\n");
     }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: M1 isolated model render/copy failed after three attempts\r\n");
+        file_log("RunicWheelLE: isolated model render/copy failed after three attempts\r\n");
     }
     drop(captured);drop(original);drop(back);
 }
