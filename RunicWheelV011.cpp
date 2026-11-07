@@ -2971,7 +2971,13 @@ int preview_probe_fault(){
     InterlockedExchange(&g_previewCapturePending,0);
     file_log("RunicWheelLE: isolated inventory render faulted; request cancelled\r\n");
     return 1;
-}void log_hresult(const char* text,HResult hr){
+}
+void guarded_preview_probe(Raw device){
+    if(!g_inventoryPreviewCapture || !InterlockedCompareExchange(&g_previewCapturePending,0,0))return;
+    __try {capture_inventory_preview_probe(device);}
+    __except(preview_probe_fault()){}
+}
+void log_hresult(const char* text,HResult hr){
     char buf[200];unsigned n=0;
     while(*text && n<170)buf[n++]=*text++;
     append_hex(buf,n,(DWord)hr);
