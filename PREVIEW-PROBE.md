@@ -1,14 +1,17 @@
-# Runic Wheel LE — M3 isolated inventory preview probe
+# Runic Wheel LE — InventoryMenu render-bridge probe
 
-Opening the wheel with M3 while hovering an item in Inventory queues a render of that item's 3D model. It does not save the visible game screenshot. M1 adds/confirms the hovered item in the selected wheel slot; M2 removes the selected slot entry.
+M3 toggles the wheel. When it opens while Inventory is already open and the cursor is over an item, it records that FormID. M1 adds the hovered item to the selected wheel slot; M2 removes the selected slot entry. Outside Inventory/Magic, M1 and M2 keep their normal right-hand and left-hand equip actions.
 
-Each successful capture is saved as a new numbered BMP. Its FormID and full path are recorded in the diagnostic log. The default folder is `C:\Users\HP\Pictures\Skyrim\RunicWheelLE`; change `PreviewCaptureDirectory` under `[Debug]` in `RunicWheelLE.ini` to use another absolute Windows path. If the requested folder cannot be created, the probe falls back to `%TEMP%\RunicWheelLE\Previews`. Existing captures are never overwritten. The game frame is restored before Present.
+For capture, the probe intercepts the byte-verified call from LE `InventoryMenu::Render` to the base menu render. It saves the frame after Scaleform draws, clears that frame to magenta, then lets the original InventoryMenu continue through its own 3D render. At Present, the probe saves the resulting candidate and restores the original frame before drawing the wheel. It does not manually invoke `Inventory3DManager::Render` from Present or change its model rows.
+
+Each candidate is saved as a new numbered BMP. The FormID and path are recorded in `RunicWheelLE-diagnostic.log`. The default folder is `C:\Users\HP\Pictures\Skyrim\RunicWheelLE`; change `PreviewCaptureDirectory` under `[Debug]` in `RunicWheelLE.ini` to use another absolute path. If that folder cannot be created, the probe falls back to `%TEMP%\RunicWheelLE\Previews`.
 
 ## In-game procedure
 
 1. Install this build as a separate MO2 mod and disable other Runic Wheel DLL copies.
-2. Load a disposable save, open Inventory, hover a weapon or armor, then press M3 to open the wheel.
-3. Wait about two seconds. Select a wheel slot and press M1 to add the item; M2 removes the selected slot entry.
-4. Close Skyrim and inspect the newest BMPs in `C:\Users\HP\Pictures\Skyrim\RunicWheelLE`. Send the diagnostic log and one or more BMPs.
+2. Load a disposable save and open Inventory.
+3. Hover an item and press M3 to open the wheel. Wait about two seconds for the queued preview capture.
+4. Select a wheel slot and press M1 to add the item; M2 removes the selected slot entry. Press M3 again to close.
+5. Check the numbered BMP and diagnostic log. A valid candidate should show the inventory model over magenta, not the game scene. Send the newest BMP and log.
 
-The renderer only attempts a capture when one Inventory3DManager row uniquely matches the hovered FormID. It temporarily reduces that manager's render list to the matching item and restores the list after rendering. Supported backbuffers must be X8R8G8B8/A8R8G8B8 and non-multisampled. This probe still does not attach image files to wheel sectors; that comes after the isolated model render is confirmed.
+This is still a probe. It does not attach captured images to wheel sectors. The render bridge is guarded by an exact LE 1.9.32.0.8 callsite check; if the executable bytes differ, preview capture disables itself while the regular wheel remains available.

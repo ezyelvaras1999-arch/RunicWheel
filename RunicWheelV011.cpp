@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-preview-probe"
+#define RUNIC_VERSION "0.26.0-InventoryMenu-render-probe"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -115,7 +115,7 @@ struct SurfaceDesc {DWord format,type,usage,pool,multiSample,quality,width,heigh
 static_assert(sizeof(SurfaceDesc)==32,"D3DSURFACE_DESC layout");
 constexpr UInit kSetTexture=65,kTextureStage=67,kSamplerState=69,kDrawUP=83,kFVF=89,kVertexShader=92,kPixelShader=107;
 constexpr UInit kCreateTexture=23,kLockTexture=19,kUnlockTexture=20;
-constexpr UInit kGetRenderTargetData=32,kStretchRect=34,kCreateOffscreenPlainSurface=36,kCreateRenderTarget=28;
+constexpr UInit kGetRenderTargetData=32,kCreateOffscreenPlainSurface=36;
 constexpr UInit kUpdateSurface=30,kColorFill=35;
 using GetViewport = HResult (W*)(Raw,Viewport*);
 using PutViewport = HResult (W*)(Raw,const Viewport*);
@@ -140,12 +140,9 @@ using CreateTexture = HResult (W*)(Raw,UInit,UInit,UInit,DWord,DWord,DWord,Raw*,
 using TextureLock = HResult (W*)(Raw,UInit,LockedRectangle*,const void*,DWord);
 using TextureUnlock = HResult (W*)(Raw,UInit);
 using CreateOffscreenSurface = HResult (W*)(Raw,UInit,UInit,DWord,DWord,Raw*,void*);
-using CreateRenderTarget = HResult (W*)(Raw,UInit,UInit,DWord,UInit,DWord,Long,Raw*,void*);
 using GetRenderTargetData = HResult (W*)(Raw,Raw,Raw);
-using StretchRect = HResult (W*)(Raw,Raw,const Rectangle*,Raw,const Rectangle*,UInit);
 using UpdateSurface = HResult (W*)(Raw,Raw,const Rectangle*,Raw,const void*);
 using ColorFill = HResult (W*)(Raw,Raw,const Rectangle*,DWord);
-using Inventory3DRender = UInt32 (__thiscall*)(Raw);
 using SurfaceLock = HResult (W*)(Raw,LockedRectangle*,const Rectangle*,DWord);
 using SurfaceUnlock = HResult (W*)(Raw);
 using DrawUp = HResult (W*)(Raw,UInit,UInit,const void*,UInit);
@@ -183,6 +180,9 @@ static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
 static volatile Long g_previewSequence=0;
 static char g_previewDirectory[260]{};
+static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
+static volatile Long g_previewClearActive=0, g_inventoryBaseRenderHooked=0;
+static volatile Long g_previewBackupFailureLogged=0;
 static int g_firstThemeEnabled=1;
 static volatile Long g_feedback=0, g_feedbackTick=0;
 // Only these timestamps/flags cross input and Present threads. No TESV calls during rendering.
@@ -321,11 +321,8 @@ int readable(const void* p,SizeT n,int code){
 }
 void drop(Raw obj){if(obj)reinterpret_cast<Release>(get(obj,2))(obj);}
 
-// Unsafe V0.7 Render detours were removed from this compilation unit.
-
-
-// Use the standard SKSE MenuManager MenuOpenCloseEvent dispatcher, not
-// unverified per-frame InventoryMenu::Render vtable detours.
+// The preview probe hooks one byte-verified direct call inside LE InventoryMenu::Render;
+// it does not alter menu vtables. Menu lifecycle/context still uses SKSE events.
 // Event name is a BSFixedString pointing to an interned char* (SKSE GameEvents.h).
 struct MenuEventData {const char* name; unsigned char opening; unsigned char pad[3];};
 struct MenuSink {Raw* methods;};
@@ -371,7 +368,8 @@ void install_menu_lifecycle(){
     }__except(menu_register_fault()){}
 }
 // SKSE's AddUITask API (interface v2, SKSE 1.7.3) is the only code path
-// touching a GFxMovieView. No InventoryMenu::Render detour or game vtable write.
+// touching a GFxMovieView. The bounded preview bridge runs only at the verified
+// Scaleform-to-3D boundary in InventoryMenu::Render.
 // Every UI task is bounded, reads only one live menu and publishes scalar values.
 // Menu names are interned pointers from MenuOpenCloseEvent, used as identity
 // only (never dereferenced on our UI scan); closed menus are rejected.
@@ -1722,7 +1720,7 @@ void queue_open_preview_capture(){
     InterlockedExchange(&g_previewCapturePending,1);
     file_log("RunicWheelLE: M3 queued isolated 3D preview capture for hovered FormID\r\n");
 }
-void activate(bool down){
+void activate(bool down,bool mouseOpenButton){
     bool was=g_activation.visible;
     bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
     if(!was && now){g_mouseX=g_mouseY=0;InterlockedExchange(&g_renderLogged,0);rw20::reset(g_scrollEdges);
@@ -1731,7 +1729,7 @@ void activate(bool down){
     if(was!=now)change_visible(now);
     if(!was && now){
         InterlockedExchange(&g_refreshNeeded,1);
-        queue_open_preview_capture();
+        if(mouseOpenButton)queue_open_preview_capture();
     }
 }
 void close_wheel(){
@@ -1803,7 +1801,7 @@ int process_event(InputEvent* event){
         // unchanged; no hidden edit toggle, undo or save interception.
         if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
         if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
-            activate(down);return 1; // never trigger the game's middle-button action
+            activate(down,mouse && b->scan==(DWord)g_cfg.openMouse);return 1; // never trigger the game's middle-button action
         }
         // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
         // Some input paths report a nonzero timer or a zero analogue value;
@@ -2897,7 +2895,7 @@ int save_surface_bmp(Raw surface,DWord width,DWord height,DWord format,DWord for
     }
     return saved;
 }
-bool inventory3d_model_matches(DWord wanted,Raw* managerOut=nullptr,unsigned* rowOut=nullptr){
+bool inventory3d_model_matches(DWord wanted){
     // SKSE LE 1.7.3 GameMenus.h: singleton 0x01B2E99C, seven 0x14-byte
     // ItemData rows at +0x44, count at +0xD0. Match the selected FormID in any row.
     if(!wanted||!readable((Raw)0x01B2E99C,4,0))return false;
@@ -2906,7 +2904,7 @@ bool inventory3d_model_matches(DWord wanted,Raw* managerOut=nullptr,unsigned* ro
     const DWord count=*(const DWord*)((const unsigned char*)manager+0xD0);
     if(!count||count>7)return false;
     const unsigned char* rows=(const unsigned char*)manager+0x44;
-    unsigned matchCount=0,matchIndex=0;
+    unsigned matchCount=0;
     for(unsigned i=0;i<count;++i){
         const unsigned char* row=rows+i*0x14;
         if(!readable(row,0x14,0))return false;
@@ -2919,132 +2917,165 @@ bool inventory3d_model_matches(DWord wanted,Raw* managerOut=nullptr,unsigned* ro
                 rowMatches=true;
             }
         }
-        if(rowMatches){matchCount++;matchIndex=i;}
+        if(rowMatches)matchCount++;
     }
-    if(matchCount!=1)return false;
-    if(managerOut)*managerOut=manager;
-    if(rowOut)*rowOut=matchIndex;
-    return true;
+    return matchCount==1;
 }
-void capture_inventory_preview_probe(Raw device){
-    if(!device||!g_inventoryPreviewCapture||
-       !InterlockedCompareExchange(&g_previewCapturePending,0,0))return;
-    if(!InterlockedCompareExchange(&g_visible,0,0)||!(InterlockedCompareExchange(&g_menuFlags,0,0)&1)){
-        InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: isolated preview capture cancelled (wheel/menu closed)\r\n");
-        return;
-    }
-    const DWord formId=(DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0);
-    const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
-    const DWord now=GetTickCount();
-    if(!formId)return;
-    if(!seen||now-seen>1500)return;
-    Raw manager=nullptr;unsigned rowIndex=0;
-    if(!inventory3d_model_matches(formId,&manager,&rowIndex)){
-        if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
-            InterlockedExchange(&g_previewCapturePending,0);
-            file_log("RunicWheelLE: preview timed out waiting for a matching loaded inventory model\r\n");
-        }
-        return;
-    }
-    InterlockedExchange(&g_previewCaptureAttempts,0);
-    Raw back=nullptr,original=nullptr,captured=nullptr,state=nullptr;
-    SurfaceDesc desc{};
+int ensure_preview_backup_surface(Raw device){
+    if(!device)return 0;
+    if(g_previewBackupSurface&&g_previewBackupDevice==device)return 1;
+    drop(g_previewBackupSurface);g_previewBackupSurface=nullptr;g_previewBackupDevice=nullptr;
+    Raw back=nullptr;SurfaceDesc desc{};
     HResult hr=reinterpret_cast<GetBack>(get(device,kGetBackBuffer))(device,0,0,0,&back);
     if(succeeded(hr)&&back)hr=reinterpret_cast<GetSurfaceDesc>(get(back,kSurfaceDesc))(back,&desc);
     if(!succeeded(hr)||!back||desc.width<320||desc.height<240||desc.width>4096||desc.height>4096||
        (desc.format!=21u&&desc.format!=22u)||desc.multiSample!=0){
-        InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: isolated preview skipped (unsupported or multisampled backbuffer)\r\n");
-        drop(back);return;
+        if(InterlockedCompareExchange(&g_previewBackupFailureLogged,1,0)==0)
+            file_log("RunicWheelLE: preview disabled for unsupported or multisampled backbuffer\r\n");
+        drop(back);return 0;
     }
     hr=reinterpret_cast<CreateOffscreenSurface>(get(device,kCreateOffscreenPlainSurface))
-        (device,desc.width,desc.height,desc.format,2u,&original,nullptr);
-    if(succeeded(hr)&&original)
-        hr=reinterpret_cast<CreateOffscreenSurface>(get(device,kCreateOffscreenPlainSurface))
-            (device,desc.width,desc.height,desc.format,2u,&captured,nullptr);
-    if(succeeded(hr)&&captured)
-        hr=reinterpret_cast<CreateBlock>(get(device,kCreateBlock))(device,1u,&state); // D3DSBT_ALL
-    if(!succeeded(hr)||!original||!captured||!state){
-        InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: isolated preview setup failed before touching the backbuffer\r\n");
-        drop(state);drop(captured);drop(original);drop(back);return;
+        (device,desc.width,desc.height,desc.format,2u,&g_previewBackupSurface,nullptr); // SYSTEMMEM for GetRenderTargetData
+    drop(back);
+    if(!succeeded(hr)||!g_previewBackupSurface){
+        if(InterlockedCompareExchange(&g_previewBackupFailureLogged,1,0)==0)
+            file_log("RunicWheelLE: could not create menu-render frame backup surface\r\n");
+        return 0;
     }
-    int backChanged=0,scene=0,captureReady=0,restoreReady=1,managerIsolated=0;
-    DWord savedItemCount=0;
-    unsigned char savedItems[7*0x14]{};
-    UInt32 rendered=0;
-    __try {
-        hr=reinterpret_cast<GetRenderTargetData>(get(device,kGetRenderTargetData))(device,back,original);
-        if(succeeded(hr)){
-            hr=reinterpret_cast<ColorFill>(get(device,kColorFill))(device,back,nullptr,0xFFFF00FFu);
-            if(succeeded(hr))backChanged=1;
-        }
-        if(backChanged){
-            hr=reinterpret_cast<Scene>(get(device,kBeginScene))(device);
-            if(succeeded(hr)){
-                scene=1;
-                unsigned char* items=(unsigned char*)manager+0x44;
-                savedItemCount=*(DWord*)((unsigned char*)manager+0xD0);
-                for(unsigned i=0;i<sizeof(savedItems);++i)savedItems[i]=items[i];
-                managerIsolated=1;
-                for(unsigned i=0;i<0x14;++i)items[i]=savedItems[rowIndex*0x14+i];
-                *(DWord*)((unsigned char*)manager+0xD0)=1;
-                rendered=reinterpret_cast<Inventory3DRender>(0x00867730u)(manager);
-                for(unsigned i=0;i<sizeof(savedItems);++i)items[i]=savedItems[i];
-                *(DWord*)((unsigned char*)manager+0xD0)=savedItemCount;
-                managerIsolated=0;
-                hr=reinterpret_cast<Scene>(get(device,kEndScene))(device);
-                scene=0;
-            }
-            if(!scene&&succeeded(hr)){
-                hr=reinterpret_cast<GetRenderTargetData>(get(device,kGetRenderTargetData))(device,back,captured);
-                if(succeeded(hr))captureReady=1;
-            }
-        }
-    }__finally{
-        if(managerIsolated){
-            unsigned char* items=(unsigned char*)manager+0x44;
-            for(unsigned i=0;i<sizeof(savedItems);++i)items[i]=savedItems[i];
-            *(DWord*)((unsigned char*)manager+0xD0)=savedItemCount;
-        }
-        if(scene)reinterpret_cast<Scene>(get(device,kEndScene))(device);
-        if(backChanged){
-            const HResult restoreHr=reinterpret_cast<UpdateSurface>(get(device,kUpdateSurface))
-                (device,original,nullptr,back,nullptr);
-            restoreReady=succeeded(restoreHr);
-        }
-        reinterpret_cast<BlockAction>(get(state,5))(state); // Apply captured D3D9 state
-        drop(state);
-    }
-    if(captureReady&&restoreReady&&save_surface_bmp(captured,desc.width,desc.height,desc.format,formId)){
+    g_previewBackupDevice=device;
+    file_log("RunicWheelLE: menu-render frame backup surface READY\r\n");
+    return 1;
+}
+void prepare_inventory_preview_capture(){
+    if(!g_inventoryPreviewCapture||!InterlockedCompareExchange(&g_previewCapturePending,0,0)||
+       InterlockedCompareExchange(&g_previewClearActive,0,0))return;
+    if(!InterlockedCompareExchange(&g_visible,0,0)||!(InterlockedCompareExchange(&g_menuFlags,0,0)&1)){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: M3 isolated inventory model capture saved over magenta; original frame restored\r\n");
-        if(g_cfg.inputDiagnostics){
-            char msg[120]{};unsigned n=0;
-            const char* prefix="RunicWheelLE: Inventory3DManager::Render returned ";
+        file_log("RunicWheelLE: preview request cancelled (wheel/Inventory menu closed)\r\n");return;
+    }
+    const DWord formId=(DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0);
+    const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
+    if(!formId||!seen||GetTickCount()-seen>1500u)return;
+    if(!g_previewBackupSurface||g_previewBackupDevice!=g_device)return;
+    if(!inventory3d_model_matches(formId)){
+        if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
+            InterlockedExchange(&g_previewCapturePending,0);
+            file_log("RunicWheelLE: menu-render probe timed out waiting for hovered model\r\n");
+        }
+        return;
+    }
+    Raw back=nullptr;
+    HResult hr=reinterpret_cast<GetBack>(get(g_device,kGetBackBuffer))(g_device,0,0,0,&back);
+    if(succeeded(hr)&&back)hr=reinterpret_cast<GetRenderTargetData>(get(g_device,kGetRenderTargetData))
+        (g_device,back,g_previewBackupSurface);
+    if(succeeded(hr))hr=reinterpret_cast<ColorFill>(get(g_device,kColorFill))
+        (g_device,back,nullptr,0xFFFF00FFu);
+    if(succeeded(hr)){
+        InterlockedExchange(&g_previewClearActive,1);
+        InterlockedExchange(&g_previewCaptureAttempts,0);
+        file_log("RunicWheelLE: after Scaleform, frame saved and cleared; vanilla Inventory3DManager render follows\r\n");
+    }else{
+        if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
+            InterlockedExchange(&g_previewCapturePending,0);
+            char msg[112]{};unsigned n=0;
+            const char* prefix="RunicWheelLE: pre-model frame save/clear failed; preview disabled hr=";
             while(*prefix)msg[n++]=*prefix++;
-            append_hex(msg,n,rendered);
-            msg[n++]='\r';msg[n++]='\n';msg[n]=0;file_log(msg);
+            append_hex(msg,n,(DWord)hr);msg[n++]='\r';msg[n++]='\n';msg[n]=0;file_log(msg);
         }
-    }else if(!restoreReady){
+    }
+    drop(back);
+}
+void finish_inventory_preview_capture(Raw device){
+    if(!InterlockedCompareExchange(&g_previewClearActive,0,0))return;
+    Raw back=nullptr,captured=nullptr;SurfaceDesc desc{};
+    HResult hr=reinterpret_cast<GetBack>(get(device,kGetBackBuffer))(device,0,0,0,&back);
+    if(succeeded(hr)&&back)hr=reinterpret_cast<GetSurfaceDesc>(get(back,kSurfaceDesc))(back,&desc);
+    if(succeeded(hr)&&back)hr=reinterpret_cast<CreateOffscreenSurface>(get(device,kCreateOffscreenPlainSurface))
+        (device,desc.width,desc.height,desc.format,2u,&captured,nullptr);
+    if(succeeded(hr)&&back&&captured)
+        hr=reinterpret_cast<GetRenderTargetData>(get(device,kGetRenderTargetData))(device,back,captured);
+    const int captureReady=succeeded(hr)&&captured;
+    HResult restoreHr=(HResult)0x80004005;
+    if(back&&g_previewBackupSurface&&g_previewBackupDevice==device)
+        restoreHr=reinterpret_cast<UpdateSurface>(get(device,kUpdateSurface))
+            (device,g_previewBackupSurface,nullptr,back,nullptr);
+    InterlockedExchange(&g_previewClearActive,0);
+    const int restoreReady=succeeded(restoreHr);
+    if(!restoreReady){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: CRITICAL isolated preview restore failed; capture cancelled\r\n");
+        file_log("RunicWheelLE: CRITICAL menu-render frame restore failed\r\n");
+    }else if(captureReady&&save_surface_bmp(captured,desc.width,desc.height,desc.format,
+        (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0))){
+        InterlockedExchange(&g_previewCapturePending,0);
+        file_log("RunicWheelLE: vanilla Inventory3DManager frame captured; original screen restored\r\n");
     }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: isolated model render/copy failed after three attempts\r\n");
+        file_log("RunicWheelLE: menu-render pixel readback failed after three attempts\r\n");
     }
-    drop(captured);drop(original);drop(back);
+    drop(captured);drop(back);
 }
 int preview_probe_fault(){
+    if(InterlockedExchange(&g_previewClearActive,0)){
+        Raw back=nullptr;
+        if(g_device&&g_previewBackupSurface&&g_previewBackupDevice==g_device&&
+           succeeded(reinterpret_cast<GetBack>(get(g_device,kGetBackBuffer))(g_device,0,0,0,&back))&&back){
+            reinterpret_cast<UpdateSurface>(get(g_device,kUpdateSurface))(g_device,g_previewBackupSurface,nullptr,back,nullptr);
+            drop(back);
+        }
+    }
     InterlockedExchange(&g_previewCapturePending,0);
-    file_log("RunicWheelLE: isolated inventory render faulted; request cancelled\r\n");
+    file_log("RunicWheelLE: menu-render preview faulted; frame restoration attempted\r\n");
     return 1;
 }
 void guarded_preview_probe(Raw device){
-    if(!g_inventoryPreviewCapture || !InterlockedCompareExchange(&g_previewCapturePending,0,0))return;
-    __try {capture_inventory_preview_probe(device);}
+    if(!g_inventoryPreviewCapture)return;
+    __try {
+        if(!g_previewBackupSurface||g_previewBackupDevice!=device)ensure_preview_backup_surface(device);
+        finish_inventory_preview_capture(device);
+    }
     __except(preview_probe_fault()){}
+}
+int preview_prepare_fault(){
+    InterlockedExchange(&g_previewCapturePending,0);
+    file_log("RunicWheelLE: preview pre-model bridge faulted; game menu render continued\r\n");
+    return 1;
+}
+extern "C" void guarded_preview_prepare_bridge(){
+    if(!InterlockedCompareExchange(&g_previewCapturePending,0,0))return;
+    __try {prepare_inventory_preview_capture();}
+    __except(preview_prepare_fault()){}
+}
+__declspec(naked) void inventory_menu_base_render_bridge(){
+    __asm {
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        push dword ptr [esp+16]
+        mov eax, 006612D0h
+        call eax
+        call guarded_preview_prepare_bridge
+        ret 16
+    }
+}
+int install_inventory_menu_render_bridge(){
+    if(InterlockedCompareExchange(&g_inventoryBaseRenderHooked,0,0))return 1;
+    unsigned char* site=(unsigned char*)v07sig::kInventoryRender;
+    if(!readable(site,sizeof(v07sig::kInventoryBaseRenderCall),1))return 0;
+    for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i)
+        if(site[i]!=v07sig::kInventoryBaseRenderCall[i])return 0;
+    const Long oldRel=*(const Long*)(site+1);
+    if((Raw)(site+5+oldRel)!=(Raw)v07sig::kInventoryBaseRender)return 0;
+    DWord oldProtect=0;
+    if(!VirtualProtect(site,5,0x40,&oldProtect))return 0;
+    site[0]=0xE8;
+    *(Long*)(site+1)=(Long)((DWord)&inventory_menu_base_render_bridge-(DWord)(site+5));
+    DWord unused=0;VirtualProtect(site,5,oldProtect,&unused);
+    FlushInstructionCache(GetCurrentProcess(),site,5);
+    const Long newRel=*(const Long*)(site+1);
+    if(site[0]!=0xE8||(Raw)(site+5+newRel)!=(Raw)&inventory_menu_base_render_bridge)return 0;
+    InterlockedExchange(&g_inventoryBaseRenderHooked,1);
+    file_log("RunicWheelLE: InventoryMenu render bridge installed at verified Scaleform-to-3D boundary\r\n");
+    return 1;
 }
 void log_hresult(const char* text,HResult hr){
     char buf[200];unsigned n=0;
@@ -3288,6 +3319,12 @@ int install_body(){
     FlushInstructionCache(GetCurrentProcess(),&vt[17],4);
     if(displaced!=(Raw)g_previous){g_previous=nullptr;return 0;}
     InterlockedExchange(&g_installed,1);
+    if(g_inventoryPreviewCapture){
+        if(!install_inventory_menu_render_bridge()){
+            InterlockedExchange(&g_inventoryPreviewCapture,0);
+            file_log("RunicWheelLE: preview disabled; InventoryMenu render callsite did not match verified LE bytes\r\n");
+        }else ensure_preview_backup_surface(device);
+    }
     format_thread_log("RunicWheelLE: Present hook installed thread ");
     log_code_owner("RunicWheelLE: Present chained to ",(Raw)g_previous);
     return 1;
