@@ -72,6 +72,7 @@ IMPORT SizeT W VirtualQuery(const void*,MBI*,SizeT);
 IMPORT Long W VirtualProtect(void*,SizeT,DWord,DWord*);
 IMPORT Long W FlushInstructionCache(Handle,const void*,SizeT);
 IMPORT Handle W GetCurrentProcess();
+IMPORT Long W InterlockedIncrement(volatile Long*);
 IMPORT Long W InterlockedCompareExchange(volatile Long*,Long,Long);
 IMPORT Long W InterlockedExchange(volatile Long*,Long);
 IMPORT Handle W GetForegroundWindow();
@@ -3250,3 +3251,4 @@ extern "C" __declspec(dllexport) bool __cdecl SKSEPlugin_Load(const SKSEInterfac
     InterlockedExchange(&g_khaosReady,1);
     return true;
 }
+
