@@ -1,0 +1,62 @@
+name: Build Runic Wheel LE v0.26 preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  build-v026:
+    runs-on: windows-2022
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare 7-Zip
+        shell: powershell
+        run: |
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            choco install 7zip --yes --no-progress
+          }
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) {
+            throw '7-Zip was not found after installation.'
+          }
+
+      - name: Download and locate the official SKSE LE 1.7.3 source
+        shell: powershell
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'skse_1_07_03.7z'
+          $extract = Join-Path $env:RUNNER_TEMP 'skse173-source'
+          New-Item -ItemType Directory -Force -Path $extract | Out-Null
+          Invoke-WebRequest -Uri 'https://skse.silverlock.org/beta/skse_1_07_03.7z' -OutFile $archive
+          7z x $archive "-o$extract" -y | Out-Host
+          if ($LASTEXITCODE -ne 0) { throw 'Could not extract the SKSE archive.' }
+          $sdk = Get-ChildItem -Path $extract -Directory -Recurse |
+            Where-Object { (Test-Path (Join-Path $_.FullName 'common')) -and (Test-Path (Join-Path $_.FullName 'skse')) } |
+            Select-Object -First 1
+          if (-not $sdk) { throw 'SKSE source folders common\ and skse\ were not found in the official archive.' }
+          "SKSE_LE_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Using SKSE source: $($sdk.FullName)"
+
+      - name: Build the x86 plugin
+        shell: powershell
+        run: |
+          $out = Join-Path $env:GITHUB_WORKSPACE 'out'
+          cmd /d /c "`"$env:GITHUB_WORKSPACE\build-v026.bat`" `"$out`""
+          if ($LASTEXITCODE -ne 0) { throw "build-v026.bat failed with exit code $LASTEXITCODE" }
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'RunicWheelLE.ini') -Destination $out
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'RunicWheelIcons.rwtx') -Destination $out
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'RunicWheelFrame.rwtx') -Destination $out
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'RunicWheelFont.rwtx') -Destination $out
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'RunicWheelPlaque.rwtx') -Destination $out
+
+      - name: Upload the test build
+        uses: actions/upload-artifact@v4
+        with:
+          name: RunicWheelLE-v026-preview
+          path: out/*
+          if-no-files-found: error
+
