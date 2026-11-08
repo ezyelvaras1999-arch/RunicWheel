@@ -1,4 +1,4 @@
-# Runic Wheel LE — InventoryMenu render-bridge probe
+# Runic Wheel LE — InventoryMenu callsite diagnostic
 
 M3 toggles the wheel. When it opens while Inventory is already open and the cursor is over an item, it records that FormID. M1 adds the hovered item to the selected wheel slot; M2 removes the selected slot entry. Outside Inventory/Magic, M1 and M2 keep their normal right-hand and left-hand equip actions.
 
@@ -14,4 +14,6 @@ Each candidate is saved as a new numbered BMP. The FormID and path are recorded 
 4. Select a wheel slot and press M1 to add the item; M2 removes the selected slot entry. Press M3 again to close.
 5. Check the numbered BMP and diagnostic log. A valid candidate should show the inventory model over magenta, not the game scene. Send the newest BMP and log.
 
-This is still a probe. It does not attach captured images to wheel sectors. The render bridge is guarded by an exact LE 1.9.32.0.8 callsite check; if the executable bytes differ, preview capture disables itself while the regular wheel remains available.
+This diagnostic build does not attach captured images to wheel sectors. Its purpose is to explain why the render bridge previously rejected the callsite. At startup it logs the observed and expected bytes at the candidate InventoryMenu callsite, and, when the candidate begins with a `CALL`, the resolved destination. It remains fail-closed: a mismatch disables only preview capture, and the normal wheel continues to use its existing input path.
+
+After installing the build, confirm the plugin log says `v0.26.0-InventoryMenu-callsite-diagnostic`, open Inventory, and press M3 once. Then send `RunicWheelLE.log` from `Data\SKSE\Plugins` and `RunicWheelLE-diagnostic.log` from `%TEMP%`. Search for `preview callsite diagnostic` in those logs.

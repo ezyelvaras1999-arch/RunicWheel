@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-InventoryMenu-render-probe"
+#define RUNIC_VERSION "0.26.0-InventoryMenu-callsite-diagnostic"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -3060,11 +3060,49 @@ __declspec(naked) void inventory_menu_base_render_bridge(){
 int install_inventory_menu_render_bridge(){
     if(InterlockedCompareExchange(&g_inventoryBaseRenderHooked,0,0))return 1;
     unsigned char* site=(unsigned char*)v07sig::kInventoryRender;
-    if(!readable(site,sizeof(v07sig::kInventoryBaseRenderCall),1))return 0;
+    if(!readable(site,sizeof(v07sig::kInventoryBaseRenderCall),1)){
+        file_log("RunicWheelLE: preview callsite diagnostic: address unreadable\r\n");
+        return 0;
+    }
+    bool bytesMatch=true;
     for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i)
-        if(site[i]!=v07sig::kInventoryBaseRenderCall[i])return 0;
+        if(site[i]!=v07sig::kInventoryBaseRenderCall[i])bytesMatch=false;
+    if(!bytesMatch){
+        char buf[180]{};unsigned n=0;const char* prefix="RunicWheelLE: preview callsite diagnostic addr=";
+        while(*prefix)buf[n++]=*prefix++;
+        append_hex(buf,n,(DWord)site);
+        const char* observed=" bytes=";while(*observed)buf[n++]=*observed++;
+        const char* digit="0123456789ABCDEF";
+        for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i){
+            buf[n++]=digit[site[i]>>4];buf[n++]=digit[site[i]&15u];
+            if(i+1<sizeof(v07sig::kInventoryBaseRenderCall))buf[n++]=' ';
+        }
+        const char* expected=" expected=";while(*expected)buf[n++]=*expected++;
+        for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i){
+            buf[n++]=digit[v07sig::kInventoryBaseRenderCall[i]>>4];
+            buf[n++]=digit[v07sig::kInventoryBaseRenderCall[i]&15u];
+            if(i+1<sizeof(v07sig::kInventoryBaseRenderCall))buf[n++]=' ';
+        }
+        if(site[0]==0xE8){
+            const Long rel=*(const Long*)(site+1);
+            const char* target=" target=";while(*target)buf[n++]=*target++;
+            append_hex(buf,n,(DWord)(site+5+rel));
+        }
+        buf[n++]='\r';buf[n++]='\n';buf[n]=0;file_log(buf);
+        return 0;
+    }
     const Long oldRel=*(const Long*)(site+1);
-    if((Raw)(site+5+oldRel)!=(Raw)v07sig::kInventoryBaseRender)return 0;
+    if((Raw)(site+5+oldRel)!=(Raw)v07sig::kInventoryBaseRender){
+        char buf[160]{};unsigned n=0;const char* prefix="RunicWheelLE: preview callsite diagnostic target mismatch addr=";
+        while(*prefix)buf[n++]=*prefix++;
+        append_hex(buf,n,(DWord)site);
+        const char* target=" computed=";while(*target)buf[n++]=*target++;
+        append_hex(buf,n,(DWord)(site+5+oldRel));
+        const char* expected=" expected=";while(*expected)buf[n++]=*expected++;
+        append_hex(buf,n,(DWord)v07sig::kInventoryBaseRender);
+        buf[n++]='\r';buf[n++]='\n';buf[n]=0;file_log(buf);
+        return 0;
+    }
     DWord oldProtect=0;
     if(!VirtualProtect(site,5,0x40,&oldProtect))return 0;
     site[0]=0xE8;
@@ -3415,7 +3453,7 @@ KHAOS_ABI bool KHAOS_ProcessWndProc(void* hwnd,unsigned int msg,uintptr_t wp,int
 
 extern "C" __declspec(dllexport) bool __cdecl SKSEPlugin_Query(const SKSEInterface* skse,PluginInfo* info){
     if(!skse||!info)return false;
-    info->infoVersion=PluginInfo::kInfoVersion;info->name="Runic Wheel LE";info->version=126;
+    info->infoVersion=PluginInfo::kInfoVersion;info->name="Runic Wheel LE";info->version=127;
     if(skse->isEditor||skse->runtimeVersion!=RUNTIME_VERSION_1_9_32_0||!skse->GetPluginHandle)return false;
     begin_log(); file_log("RunicWheelLE: v" RUNIC_VERSION " Query entered\r\n");
     g_handle=skse->GetPluginHandle();return g_handle!=(PluginHandle)kPluginHandle_Invalid;
