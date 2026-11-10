@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-InventoryMenu-vtable-render-probe"
+#define RUNIC_VERSION "0.26.0-FormID-memory-preview"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -162,6 +162,8 @@ static int g_pipsUsed=0;
 static Vertex g_labels[30000];
 static TextureVertex g_artQuads[8*6]; // one primary medallion per sector
 static TextureVertex g_miniArtQuads[8*6]; // dedicated late D3D9 pass for all stacked previews
+static TextureVertex g_formPreviewQuads[8*6];
+static int g_formPreviewSectorCache[8];
 static TextureVertex g_frameQuads[6];
 static TextureVertex g_plaqueQuads[6];
 static TextureVertex g_fontQuads[6*1400];
@@ -178,9 +180,11 @@ static Raw g_atlasOwner=nullptr;
 static int g_iconAtlasChecked=0;
 static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
-static volatile Long g_previewSequence=0;
-static char g_previewDirectory[260]{};
 static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
+static Raw g_formPreviewTextures[24]{};
+static DWord g_formPreviewForms[24]{};
+static Raw g_formPreviewDevice=nullptr;
+static unsigned g_formPreviewNext=0;
 static volatile Long g_previewClearActive=0, g_inventoryRenderBridgeHooked=0;
 static volatile Long g_previewBackupFailureLogged=0;
 static int g_firstThemeEnabled=1;
@@ -1431,9 +1435,7 @@ void load_config(){
     if(!g_enableSpellActions)file_log("RunicWheelLE: native spell actions explicitly disabled by INI\r\n");
     if(!g_hoverCaptureEnabled)file_log("RunicWheelLE: UI task disabled by config\r\n");
     g_inventoryPreviewCapture=GetPrivateProfileIntA("Debug","CaptureInventoryPreview",0,g_configPath)?1:0;
-    GetPrivateProfileStringA("Debug","PreviewCaptureDirectory",
-        "C:\\Users\\HP\\Pictures\\Skyrim\\RunicWheelLE",g_previewDirectory,sizeof(g_previewDirectory),g_configPath);
-    if(g_inventoryPreviewCapture)file_log("RunicWheelLE: isolated inventory-model capture ENABLED (M3 wheel-open trigger)\r\n");
+    if(g_inventoryPreviewCapture)file_log("RunicWheelLE: in-memory FormID model preview ENABLED (M3 inventory hover)\r\n");
     if(!g_enableSlowTime)file_log("RunicWheelLE: slow-time disabled by 100 percent speed setting\r\n");
     load_catalog();
     rw04::State legacy{};
@@ -1718,7 +1720,7 @@ void queue_open_preview_capture(){
     InterlockedExchange(&g_previewCaptureForm,(Long)form);
     InterlockedExchange(&g_previewCaptureAttempts,0);
     InterlockedExchange(&g_previewCapturePending,1);
-    file_log("RunicWheelLE: M3 queued isolated 3D preview capture for hovered FormID\r\n");
+    file_log("RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
 }
 void activate(bool down,bool mouseOpenButton){
     bool was=g_activation.visible;
@@ -2229,6 +2231,8 @@ void release_theme(){
     drop(g_frameAtlas);g_frameAtlas=nullptr;
     drop(g_fontAtlas);g_fontAtlas=nullptr;
     drop(g_plaqueAtlas);g_plaqueAtlas=nullptr;
+    for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     g_atlasOwner=nullptr;g_iconAtlasChecked=0;
 }
 int texture_path(const char* filename,char* out,UInit cap){
@@ -2496,6 +2500,7 @@ Nameplate nameplate(float width,float height,float cx,float cy,float outer,const
 }
 void draw_labels(float width,float height){
     g_labelVert=0;g_artVertexCount=0;g_miniArtVert=0;g_miniCount=0;g_fontVertexCount=0;
+    for(int i=0;i<8;++i)g_formPreviewSectorCache[i]=-1;
     const float d=width<height?width:height;
     float outer=d*.31f*(float)g_cfg.wheelScale/100.f;
     if(outer>440.f)outer=440.f; if(outer>height*.44f)outer=height*.44f;
@@ -2628,6 +2633,14 @@ void draw_labels(float width,float height){
         }
         if(g_iconAtlas && g_firstThemeEnabled){
             add_art_icon(x,y,g_iconIndices[wheel][sector][index],sector_weight(sector),outer);
+            int cacheSlot=-1;
+            for(int ci=0;ci<24;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
+            if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot]){
+                const float previewSize=outer*.34f;int q=sector*6;
+                quad_tex(g_formPreviewQuads,q,x-previewSize*.5f,y-previewSize*.5f,
+                    previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);
+                g_formPreviewSectorCache[sector]=cacheSlot;
+            }
             if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
                 const unsigned next=rw20::preview_index(index,slot.count);
                 // Rounded-metal substrate in geometric pass; actual miniature is
@@ -2766,6 +2779,8 @@ void apply_presentation(float width,float height){
     for(int i=0;i<g_pipsUsed;++i)apply_to_vertex(g_pips[i],cx,cy,scale,opacity);
     for(int i=0;i<g_labelVert;++i)apply_to_vertex(g_labels[i],cx,cy,scale,opacity);
     for(int i=0;i<g_artVertexCount;++i)apply_to_vertex(g_artQuads[i],cx,cy,scale,opacity);
+    for(int sector=0;sector<8;++sector)if(g_formPreviewSectorCache[sector]>=0)
+        for(int i=sector*6;i<sector*6+6;++i)apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);
     for(int i=0;i<6;++i){apply_to_vertex(g_frameQuads[i],cx,cy,scale,opacity);
                           apply_to_vertex(g_plaqueQuads[i],cx,cy,scale,opacity);}
     for(int i=0;i<g_fontVertexCount;++i)apply_to_vertex(g_fontQuads[i],cx,cy,scale,opacity);
@@ -2800,100 +2815,72 @@ void append_hex(char* buf,unsigned& n,DWord v){
     buf[n++]='0';buf[n++]='x';
     for(int i=7;i>=0;--i)buf[n++]=digit[(v>>(i*4))&15u];
 }
-void put_u16(unsigned char* p,unsigned v){p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);}
-void put_u32(unsigned char* p,DWord v){p[0]=(unsigned char)v;p[1]=(unsigned char)(v>>8);p[2]=(unsigned char)(v>>16);p[3]=(unsigned char)(v>>24);}
-int create_directory_tree(const char* directory){
-    char path[260]{};UInit n=0;
-    while(directory[n]&&n<sizeof(path)-1){path[n]=directory[n];++n;}
-    if(!n||n>=sizeof(path)-1||path[1]!=':'||path[2]!='\\')return 0;
-    path[n]=0;
-    for(UInit i=3;i<=n;++i){
-        if(path[i]=='\\'||path[i]=='/'||path[i]==0){
-            const char saved=path[i];path[i]=0;
-            const int made=CreateDirectoryA(path,nullptr)!=0;
-            const DWord error=made?0:GetLastError();
-            path[i]=saved;
-            if(!made&&error!=183u)return 0; // ERROR_ALREADY_EXISTS
-        }
-    }
-    return 1;
-}
-int ensure_preview_directory(){
-    if(create_directory_tree(g_previewDirectory))return 1;
-    char temp[200]{};const UInit length=GetTempPathA(sizeof(temp),temp);
-    if(!length||length>=sizeof(temp))return 0;
-    UInit n=length;
-    if(n&&temp[n-1]!='\\'&&temp[n-1]!='/')temp[n++]='\\';
-    const char* suffix="RunicWheelLE\\Previews";
-    for(UInit i=0;suffix[i]&&n<sizeof(temp)-1;++i)temp[n++]=suffix[i];
-    if(n>=sizeof(temp)-1)return 0;temp[n]=0;
-    for(UInit i=0;i<=n;++i)g_previewDirectory[i]=temp[i];
-    file_log("RunicWheelLE: requested preview folder unavailable; using TEMP\\RunicWheelLE\\Previews\r\n");
-    return create_directory_tree(g_previewDirectory);
-}
-int preview_probe_path(char* out,UInit cap,DWord sequence){
-    if(!out||!cap||!g_previewDirectory[0])return 0;
-    UInit n=0;while(g_previewDirectory[n]&&n<sizeof(g_previewDirectory)-1){if(n+1>=cap)return 0;out[n]=g_previewDirectory[n];++n;}
-    if(n+1>=cap)return 0;
-    if(n&&out[n-1]!='\\'&&out[n-1]!='/')out[n++]='\\';
-    const char* prefix="RunicWheelLE-preview-";while(*prefix){if(n+1>=cap)return 0;out[n++]=*prefix++;}
-    DWord div=1000000u;for(int i=0;i<6;++i){if(n+1>=cap)return 0;out[n++]=(char)('0'+(sequence/div)%10u);div/=10u;}
-    const char* ext=".bmp";while(*ext){if(n+1>=cap)return 0;out[n++]=*ext++;}out[n]=0;
-    return 1;
-}
-int save_surface_bmp(Raw surface,DWord width,DWord height,DWord format,DWord formId){
-    if(!surface||!width||!height||width>4096||height>4096||
-       (format!=21u&&format!=22u))return 0; // A8R8G8B8 / X8R8G8B8
-    const DWord rowBytes=width*4u,imageBytes=rowBytes*height;
-    if(imageBytes>0xFFFFFF00u-54u)return 0;
-    LockedRectangle lock{};
-    if(!succeeded(reinterpret_cast<SurfaceLock>(get(surface,13))(surface,&lock,nullptr,0x10u))||
-       !lock.bits||lock.pitch<(Long)rowBytes||lock.pitch>32768||
-       !readable(lock.bits,(SizeT)(DWord)lock.pitch*height,0)){
-        if(lock.bits)reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
+int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord format,DWord formId){
+    constexpr unsigned side=128,inner=116;
+    if(!device||!surface||!formId||!width||!height||width>4096||height>4096||
+       (format!=21u&&format!=22u))return 0;
+    LockedRectangle src{};
+    if(!succeeded(reinterpret_cast<SurfaceLock>(get(surface,13))(surface,&src,nullptr,0x10u))||
+       !src.bits||src.pitch<(Long)(width*4u)||src.pitch>32768||
+       !readable(src.bits,(SizeT)(DWord)src.pitch*height,0)){
+        if(src.bits)reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
         return 0;
     }
-    char path[320]{};
-    int saved=0;
-    if(ensure_preview_directory()){
-      for(unsigned attempt=0;attempt<1000&&!saved;++attempt){
-        const DWord sequence=(DWord)InterlockedIncrement(&g_previewSequence);
-        if(!preview_probe_path(path,sizeof(path),sequence))break;
-        Handle file=CreateFileA(path,0x40000000u,0,nullptr,1,0x80,nullptr); // CREATE_NEW: never overwrite
-        if(file==(Handle)(-1)){
-            const DWord error=GetLastError();
-            if(error==80u||error==183u)continue; // name already exists; take next sequence
-            break;
-        }else{
-            unsigned char header[54]{};
-            header[0]='B';header[1]='M';
-            put_u32(header+2,54u+imageBytes);put_u32(header+10,54u);
-            put_u32(header+14,40u);put_u32(header+18,width);
-            put_u32(header+22,0u-height);put_u16(header+26,1u);
-            put_u16(header+28,32u);put_u32(header+34,imageBytes);
-            put_u32(header+38,2835u);put_u32(header+42,2835u);
-            DWord written=0;
-            saved=WriteFile(file,header,sizeof(header),&written,nullptr)&&written==sizeof(header);
-            for(DWord y=0;saved&&y<height;++y){
-                const unsigned char* row=(const unsigned char*)lock.bits+y*(DWord)lock.pitch;
-                written=0;saved=WriteFile(file,row,rowBytes,&written,nullptr)&&written==rowBytes;
-            }
-            CloseHandle(file);
+    unsigned minX=width,minY=height,maxX=0,maxY=0,visible=0;
+    for(unsigned y=0;y<height;++y){
+        const unsigned char* row=(const unsigned char*)src.bits+y*(DWord)src.pitch;
+        for(unsigned x=0;x<width;++x){
+            const unsigned char* p=row+x*4u;
+            const int delta=(255-(int)p[2])>(int)p[1]?(255-(int)p[2]):(int)p[1];
+            const int diff=delta>(255-(int)p[0])?delta:(255-(int)p[0]);
+            if(diff>3){if(x<minX)minX=x;if(y<minY)minY=y;if(x>maxX)maxX=x;if(y>maxY)maxY=y;++visible;}
         }
-      }
     }
+    if(visible<48||minX>=maxX||minY>=maxY){
+        reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);return 0;
+    }
+    Raw texture=nullptr;
+    HResult hr=reinterpret_cast<CreateTexture>(get(device,kCreateTexture))
+        (device,side,side,1,0,21,1,&texture,nullptr); // A8R8G8B8, managed pool
+    if(!succeeded(hr)||!texture){reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);return 0;}
+    LockedRectangle dst{};
+    hr=reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&dst,nullptr,0);
+    if(!succeeded(hr)||!dst.bits||dst.pitch<(Long)(side*4u)){
+        if(dst.bits)reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+        drop(texture);reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);return 0;
+    }
+    for(unsigned y=0;y<side;++y){
+        unsigned char* row=(unsigned char*)dst.bits+y*(UInit)dst.pitch;
+        for(unsigned x=0;x<side;++x){row[x*4u]=row[x*4u+1]=row[x*4u+2]=row[x*4u+3]=0;}
+    }
+    const unsigned cropW=maxX-minX+1,cropH=maxY-minY+1;
+    const float scale=(cropW>cropH?(float)inner/(float)cropW:(float)inner/(float)cropH);
+    const unsigned outW=(unsigned)(cropW*scale+.5f),outH=(unsigned)(cropH*scale+.5f);
+    const unsigned offsetX=(side-outW)/2,offsetY=(side-outH)/2;
+    for(unsigned y=0;y<outH;++y){
+        const unsigned sy=minY+(unsigned)((float)y/scale);
+        const unsigned char* srow=(const unsigned char*)src.bits+sy*(DWord)src.pitch;
+        unsigned char* drow=(unsigned char*)dst.bits+(offsetY+y)*(UInit)dst.pitch;
+        for(unsigned x=0;x<outW;++x){
+            const unsigned sx=minX+(unsigned)((float)x/scale);
+            const unsigned char* s=srow+sx*4u;unsigned char* d=drow+(offsetX+x)*4u;
+            const int delta=(255-(int)s[2])>(int)s[1]?(255-(int)s[2]):(int)s[1];
+            const int diff=delta>(255-(int)s[0])?delta:(255-(int)s[0]);
+            d[0]=s[0];d[1]=s[1];d[2]=s[2];d[3]=(unsigned char)(diff<0?0:(diff>64?255:diff*4));
+        }
+    }
+    reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
     reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
-    if(saved){
-        char msg[480]{};unsigned n=0;
-        const char* prefix="RunicWheelLE: isolated preview candidate written, FormID=";
-        while(*prefix)msg[n++]=*prefix++;
-        append_hex(msg,n,formId);
-        const char* suffix=" file=";while(*suffix)msg[n++]=*suffix++;
-        for(UInit i=0;path[i]&&n<sizeof(msg)-4;++i)msg[n++]=path[i];
-        msg[n++]='\r';msg[n++]='\n';
-        msg[n]=0;file_log(msg);
+    if(g_formPreviewDevice!=device){
+        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+        g_formPreviewDevice=device;g_formPreviewNext=0;
     }
-    return saved;
+    int cacheSlot=-1;
+    for(unsigned i=0;i<24;++i)if(g_formPreviewForms[i]==formId){cacheSlot=(int)i;break;}
+    if(cacheSlot<0)for(unsigned i=0;i<24;++i)if(!g_formPreviewForms[i]){cacheSlot=(int)i;break;}
+    if(cacheSlot<0)cacheSlot=(int)(g_formPreviewNext++%24u);
+    drop(g_formPreviewTextures[cacheSlot]);g_formPreviewTextures[cacheSlot]=texture;g_formPreviewForms[cacheSlot]=formId;
+    return 1;
 }
 bool inventory3d_model_matches(DWord wanted){
     // SKSE LE 1.7.3 GameMenus.h: singleton 0x01B2E99C, seven 0x14-byte
@@ -2972,7 +2959,6 @@ void prepare_inventory_preview_capture(){
         (g_device,back,nullptr,0xFFFF00FFu);
     if(succeeded(hr)){
         InterlockedExchange(&g_previewClearActive,1);
-        InterlockedExchange(&g_previewCaptureAttempts,0);
         file_log("RunicWheelLE: after Scaleform, frame saved and cleared; vanilla Inventory3DManager render follows\r\n");
     }else{
         if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
@@ -3004,13 +2990,13 @@ void finish_inventory_preview_capture(Raw device){
     if(!restoreReady){
         InterlockedExchange(&g_previewCapturePending,0);
         file_log("RunicWheelLE: CRITICAL menu-render frame restore failed\r\n");
-    }else if(captureReady&&save_surface_bmp(captured,desc.width,desc.height,desc.format,
+    }else if(captureReady&&cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
         (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0))){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: vanilla Inventory3DManager frame captured; original screen restored\r\n");
+        file_log("RunicWheelLE: compact FormID thumbnail cached in memory; original screen restored and no image file written\r\n");
     }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){
         InterlockedExchange(&g_previewCapturePending,0);
-        file_log("RunicWheelLE: menu-render pixel readback failed after three attempts\r\n");
+        file_log("RunicWheelLE: no isolated model pixels found after three attempts; no thumbnail cached\r\n");
     }
     drop(captured);drop(back);
 }
@@ -3045,13 +3031,26 @@ extern "C" void guarded_preview_prepare_bridge(){
     __try {prepare_inventory_preview_capture();}
     __except(preview_prepare_fault()){}
 }
+extern "C" void guarded_preview_finish_bridge(){
+    if(!InterlockedCompareExchange(&g_previewClearActive,0,0))return;
+    __try {guarded_preview_probe(g_device);}
+    __except(preview_probe_fault()){}
+}
 __declspec(naked) void inventory3d_render_bridge(){
     __asm {
         push ecx
         call guarded_preview_prepare_bridge
         pop ecx
         mov eax, 00867730h
-        jmp eax
+        call eax
+        push eax
+        push ecx
+        push edx
+        call guarded_preview_finish_bridge
+        pop edx
+        pop ecx
+        pop eax
+        ret
     }
 }
 int install_inventory_menu_render_bridge(){
@@ -3279,6 +3278,11 @@ int draw(Raw device){
         if(ok && InterlockedCompareExchange(&g_previewLogged,1,0)==0)
             file_log("RunicWheelLE: v0.22 stack miniature LATE PASS rendered\r\n");
     }
+    for(int sector=0;ok&&sector<8;++sector){
+        const int cacheSlot=g_formPreviewSectorCache[sector];
+        if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot])
+            ok=draw_textured_pass(device,g_formPreviewTextures[cacheSlot],&g_formPreviewQuads[sector*6],2);
+    }
     if(ok && g_fontAtlas && g_fontVertexCount)ok=draw_textured_pass(device,g_fontAtlas,g_fontQuads,(UInit)(g_fontVertexCount/3));
     reset_texture_pass(device);
     if(ok)InterlockedExchange(&g_drawStep,0);
@@ -3479,7 +3483,7 @@ extern "C" __declspec(dllexport) bool __cdecl SKSEPlugin_Load(const SKSEInterfac
     g_tasks=(SKSETaskInterface*)skse->QueryInterface(kInterface_Task);
     if(!g_tasks || g_tasks->interfaceVersion<2 || !g_tasks->AddUITask || !g_tasks->AddTask){
         g_tasks=nullptr;
-        file_log("RunicWheelLE: SKSE UI task API absent; inventory capture disabled\r\n");
+        file_log("RunicWheelLE: SKSE UI task API absent; inventory model preview disabled\r\n");
     }
     load_config();file_log("RunicWheelLE: v0.26 exact item copies, shouts, powers, scrolls, ingredients; overlay state isolation; MSVC x86\r\n");
     auto* serial=(SKSESerializationInterface*)skse->QueryInterface(kInterface_Serialization);
