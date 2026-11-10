@@ -2632,10 +2632,11 @@ void draw_labels(float width,float height){
             mark_quad(x-27.f,y+outer*.173f,54.f,2.6f,tinted(tint));
         }
         if(g_iconAtlas && g_firstThemeEnabled){
-            add_art_icon(x,y,g_iconIndices[wheel][sector][index],sector_weight(sector),outer);
             int cacheSlot=-1;
             for(int ci=0;ci<24;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
-            if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot]){
+            const bool hasItemPreview=b.kind!=rw05::Spell&&cacheSlot>=0&&g_formPreviewTextures[cacheSlot];
+            if(!hasItemPreview)add_art_icon(x,y,g_iconIndices[wheel][sector][index],sector_weight(sector),outer);
+            if(hasItemPreview){
                 const float previewSize=outer*.34f;int q=sector*6;
                 quad_tex(g_formPreviewQuads,q,x-previewSize*.5f,y-previewSize*.5f,
                     previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);
