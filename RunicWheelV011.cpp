@@ -2683,10 +2683,10 @@ void draw_labels(float width,float height){
             float visibleIconSize=outer*.398f;
             if(visibleIconSize>181.f)visibleIconSize=181.f;
             visibleIconSize*=((float)g_iconScalePercent/100.f)*(1.f+.055f*sector_weight(sector));
+            float previewSize=outer*.34f*(b.kind==rw05::Weapon?(float)g_weaponPreviewSizePercent/100.f:1.f);
+            if(previewSize>181.f)previewSize=181.f;
             if(!hasItemPreview)add_art_icon(x,y,iconId,sector_weight(sector),outer);
             if(hasItemPreview){
-                float previewSize=outer*.34f*(b.kind==rw05::Weapon?(float)g_weaponPreviewSizePercent/100.f:1.f);
-                if(previewSize>181.f)previewSize=181.f;
                 visibleIconSize=previewSize;int q=sector*6;
                 quad_tex(g_formPreviewQuads,q,x-previewSize*.5f,y-previewSize*.5f,
                     previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);

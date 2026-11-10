@@ -554,9 +554,9 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
             const int id=khaos_field_index(g_khaosTab,row+g_khaosScroll);
             if(id>=0){
                 g_khaosFocus=id;
-                const float bx=d.x+d.leftW-89.f*d.scale;
-                if(x>=bx-97.f*d.scale && x<=bx-43.f*d.scale)khaos_adjust(id,-1);
-                else if(x>=bx+40.f*d.scale && x<=bx+89.f*d.scale)khaos_adjust(id,1);
+                const float fieldControlX=d.x+d.leftW-89.f*d.scale;
+                if(x>=fieldControlX-97.f*d.scale && x<=fieldControlX-43.f*d.scale)khaos_adjust(id,-1);
+                else if(x>=fieldControlX+40.f*d.scale && x<=fieldControlX+89.f*d.scale)khaos_adjust(id,1);
                 else if(g_khaosFields[id].max==1 && g_khaosFields[id].min==0)khaos_adjust(id,g_khaosDraft[id]? -1:1);
             }return true;
         }
