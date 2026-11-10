@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-InventoryMenu-callsite-diagnostic"
+#define RUNIC_VERSION "0.26.0-InventoryMenu-vtable-render-probe"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -181,7 +181,7 @@ static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
 static volatile Long g_previewSequence=0;
 static char g_previewDirectory[260]{};
 static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
-static volatile Long g_previewClearActive=0, g_inventoryBaseRenderHooked=0;
+static volatile Long g_previewClearActive=0, g_inventoryRenderBridgeHooked=0;
 static volatile Long g_previewBackupFailureLogged=0;
 static int g_firstThemeEnabled=1;
 static volatile Long g_feedback=0, g_feedbackTick=0;
@@ -3045,74 +3045,87 @@ extern "C" void guarded_preview_prepare_bridge(){
     __try {prepare_inventory_preview_capture();}
     __except(preview_prepare_fault()){}
 }
-__declspec(naked) void inventory_menu_base_render_bridge(){
+__declspec(naked) void inventory3d_render_bridge(){
     __asm {
-        push dword ptr [esp+16]
-        push dword ptr [esp+16]
-        push dword ptr [esp+16]
-        push dword ptr [esp+16]
-        mov eax, 006612D0h
-        call eax
+        push ecx
         call guarded_preview_prepare_bridge
-        ret 16
+        pop ecx
+        mov eax, 00867730h
+        jmp eax
     }
 }
 int install_inventory_menu_render_bridge(){
-    if(InterlockedCompareExchange(&g_inventoryBaseRenderHooked,0,0))return 1;
-    unsigned char* site=(unsigned char*)v07sig::kInventoryRender;
-    if(!readable(site,sizeof(v07sig::kInventoryBaseRenderCall),1)){
-        file_log("RunicWheelLE: preview callsite diagnostic: address unreadable\r\n");
+    if(InterlockedCompareExchange(&g_inventoryRenderBridgeHooked,0,0))return 1;
+    Raw* vtable=(Raw*)v07sig::kInventoryMenuVtable;
+    if(!readable(vtable,(v07sig::kInventoryRenderVtableIndex+1u)*sizeof(Raw),0)){
+        file_log("RunicWheelLE: InventoryMenu vtable unreadable; preview disabled\r\n");
         return 0;
     }
-    bool bytesMatch=true;
-    for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i)
-        if(site[i]!=v07sig::kInventoryBaseRenderCall[i])bytesMatch=false;
-    if(!bytesMatch){
-        char buf[180]{};unsigned n=0;const char* prefix="RunicWheelLE: preview callsite diagnostic addr=";
+    if(vtable[v07sig::kInventoryRenderVtableIndex]!=(Raw)v07sig::kInventoryRender){
+        char buf[130]{};unsigned n=0;const char* prefix="RunicWheelLE: InventoryMenu vtable[6] mismatch actual=";
         while(*prefix)buf[n++]=*prefix++;
-        append_hex(buf,n,(DWord)site);
-        const char* observed=" bytes=";while(*observed)buf[n++]=*observed++;
+        append_hex(buf,n,(DWord)vtable[v07sig::kInventoryRenderVtableIndex]);
+        const char* expected=" expected=";while(*expected)buf[n++]=*expected++;
+        append_hex(buf,n,(DWord)v07sig::kInventoryRender);
+        buf[n++]='\r';buf[n++]='\n';buf[n]=0;file_log(buf);
+        return 0;
+    }
+    unsigned char* function=(unsigned char*)v07sig::kInventoryRender;
+    if(!readable(function,sizeof(v07sig::kInventoryRenderBytes),1)){
+        file_log("RunicWheelLE: InventoryMenu::Render bytes unreadable; preview disabled\r\n");
+        return 0;
+    }
+    bool renderMatches=true;
+    for(unsigned i=0;i<sizeof(v07sig::kInventoryRenderBytes);++i)
+        if(function[i]!=v07sig::kInventoryRenderBytes[i])renderMatches=false;
+    if(!renderMatches){
+        char buf[300]{};unsigned n=0;const char* prefix="RunicWheelLE: InventoryMenu::Render signature mismatch; actual=";
+        while(*prefix)buf[n++]=*prefix++;
         const char* digit="0123456789ABCDEF";
-        for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i){
-            buf[n++]=digit[site[i]>>4];buf[n++]=digit[site[i]&15u];
-            if(i+1<sizeof(v07sig::kInventoryBaseRenderCall))buf[n++]=' ';
+        for(unsigned i=0;i<sizeof(v07sig::kInventoryRenderBytes);++i){
+            buf[n++]=digit[function[i]>>4];buf[n++]=digit[function[i]&15u];
+            if(i+1<sizeof(v07sig::kInventoryRenderBytes))buf[n++]=' ';
         }
         const char* expected=" expected=";while(*expected)buf[n++]=*expected++;
-        for(unsigned i=0;i<sizeof(v07sig::kInventoryBaseRenderCall);++i){
-            buf[n++]=digit[v07sig::kInventoryBaseRenderCall[i]>>4];
-            buf[n++]=digit[v07sig::kInventoryBaseRenderCall[i]&15u];
-            if(i+1<sizeof(v07sig::kInventoryBaseRenderCall))buf[n++]=' ';
-        }
-        if(site[0]==0xE8){
-            const Long rel=*(const Long*)(site+1);
-            const char* target=" target=";while(*target)buf[n++]=*target++;
-            append_hex(buf,n,(DWord)(site+5+rel));
+        for(unsigned i=0;i<sizeof(v07sig::kInventoryRenderBytes);++i){
+            buf[n++]=digit[v07sig::kInventoryRenderBytes[i]>>4];
+            buf[n++]=digit[v07sig::kInventoryRenderBytes[i]&15u];
+            if(i+1<sizeof(v07sig::kInventoryRenderBytes))buf[n++]=' ';
         }
         buf[n++]='\r';buf[n++]='\n';buf[n]=0;file_log(buf);
         return 0;
     }
+    unsigned char* site=(unsigned char*)v07sig::kInventoryRenderTailJump;
+    if(!readable(site,5,1)||site[0]!=0xE9){
+        file_log("RunicWheelLE: InventoryMenu::Render 3D tail jump missing; preview disabled\r\n");
+        return 0;
+    }
     const Long oldRel=*(const Long*)(site+1);
-    if((Raw)(site+5+oldRel)!=(Raw)v07sig::kInventoryBaseRender){
-        char buf[160]{};unsigned n=0;const char* prefix="RunicWheelLE: preview callsite diagnostic target mismatch addr=";
+    if((Raw)(site+5+oldRel)!=(Raw)v07sig::kInventory3DRenderTarget){
+        char buf[170]{};unsigned n=0;const char* prefix="RunicWheelLE: InventoryMenu 3D tail target mismatch actual=";
         while(*prefix)buf[n++]=*prefix++;
-        append_hex(buf,n,(DWord)site);
-        const char* target=" computed=";while(*target)buf[n++]=*target++;
         append_hex(buf,n,(DWord)(site+5+oldRel));
         const char* expected=" expected=";while(*expected)buf[n++]=*expected++;
-        append_hex(buf,n,(DWord)v07sig::kInventoryBaseRender);
+        append_hex(buf,n,(DWord)v07sig::kInventory3DRenderTarget);
         buf[n++]='\r';buf[n++]='\n';buf[n]=0;file_log(buf);
         return 0;
     }
     DWord oldProtect=0;
-    if(!VirtualProtect(site,5,0x40,&oldProtect))return 0;
+    if(!VirtualProtect(site,5,0x40,&oldProtect)){
+        file_log("RunicWheelLE: could not make InventoryMenu 3D tail writable; preview disabled\r\n");
+        return 0;
+    }
     site[0]=0xE8;
-    *(Long*)(site+1)=(Long)((DWord)&inventory_menu_base_render_bridge-(DWord)(site+5));
+    *(Long*)(site+1)=(Long)((DWord)&inventory3d_render_bridge-(DWord)(site+5));
     DWord unused=0;VirtualProtect(site,5,oldProtect,&unused);
     FlushInstructionCache(GetCurrentProcess(),site,5);
     const Long newRel=*(const Long*)(site+1);
-    if(site[0]!=0xE8||(Raw)(site+5+newRel)!=(Raw)&inventory_menu_base_render_bridge)return 0;
-    InterlockedExchange(&g_inventoryBaseRenderHooked,1);
-    file_log("RunicWheelLE: InventoryMenu render bridge installed at verified Scaleform-to-3D boundary\r\n");
+    if(site[0]!=0xE8||(Raw)(site+5+newRel)!=(Raw)&inventory3d_render_bridge){
+        file_log("RunicWheelLE: InventoryMenu 3D tail bridge verification failed\r\n");
+        return 0;
+    }
+    InterlockedExchange(&g_inventoryRenderBridgeHooked,1);
+    file_log("RunicWheelLE: InventoryMenu vtable[6] verified; Scaleform-to-3D render bridge installed\r\n");
     return 1;
 }
 void log_hresult(const char* text,HResult hr){
@@ -3453,7 +3466,7 @@ KHAOS_ABI bool KHAOS_ProcessWndProc(void* hwnd,unsigned int msg,uintptr_t wp,int
 
 extern "C" __declspec(dllexport) bool __cdecl SKSEPlugin_Query(const SKSEInterface* skse,PluginInfo* info){
     if(!skse||!info)return false;
-    info->infoVersion=PluginInfo::kInfoVersion;info->name="Runic Wheel LE";info->version=127;
+    info->infoVersion=PluginInfo::kInfoVersion;info->name="Runic Wheel LE";info->version=128;
     if(skse->isEditor||skse->runtimeVersion!=RUNTIME_VERSION_1_9_32_0||!skse->GetPluginHandle)return false;
     begin_log(); file_log("RunicWheelLE: v" RUNIC_VERSION " Query entered\r\n");
     g_handle=skse->GetPluginHandle();return g_handle!=(PluginHandle)kPluginHandle_Invalid;

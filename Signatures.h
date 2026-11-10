@@ -26,10 +26,15 @@ constexpr unsigned long kSetGlobalTimeMultiplier=0x00A4B150u;
 constexpr unsigned long kGFxGetMember=0x00923960u;
 constexpr unsigned long kGFxReleaseManaged=0x00922660u;
 constexpr unsigned long kLookupFormByID=0x00451A30u;
-constexpr unsigned long kInventoryRender=0x00849200u;
-constexpr unsigned long kInventoryBaseRender=0x006612D0u; // target of InventoryMenu::Render's first verified call
+constexpr unsigned long kInventoryRenderVtableIndex=6u; // IMenu::Render in InventoryMenu's LE vtable
+constexpr unsigned long kInventoryRender=0x00849200u; // InventoryMenu vtable[6]
+constexpr unsigned long kInventoryRenderTailJump=0x00849217u; // after Scaleform view->Render
+constexpr unsigned long kInventory3DRenderTarget=0x00867730u; // original tail target: inventory 3D render
 constexpr unsigned long kMagicRender=0x00873940u;
-constexpr unsigned char kInventoryBaseRenderCall[5]={0xE8,0xCB,0x80,0xE1,0xFF};
+constexpr unsigned char kInventoryRenderBytes[29]={
+    0x8B,0x49,0x08,0x85,0xC9,0x74,0x15,0x8B,0x01,0x8B,0x90,0x98,0x00,0x00,
+    0x00,0xFF,0xD2,0x8B,0x0D,0x9C,0xE9,0xB2,0x01,0xE9,0x14,0xE5,0x01,0x00,0xC3
+};
 constexpr unsigned char kSlowPrologue[5]={0x80,0x79,0x2c,0x00,0x74};
 constexpr unsigned char kGetMemberPrologue[3]={0x83,0xec,0x10};
 constexpr unsigned char kReleaseManagedPrologue[3]={0x8b,0x44,0x24};
