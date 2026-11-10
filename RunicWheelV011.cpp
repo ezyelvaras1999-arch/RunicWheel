@@ -163,6 +163,7 @@ static Vertex g_labels[30000];
 static TextureVertex g_artQuads[8*6]; // one primary medallion per sector
 static TextureVertex g_miniArtQuads[8*6]; // dedicated late D3D9 pass for all stacked previews
 static TextureVertex g_formPreviewQuads[8*6];
+static TextureVertex g_formPreviewOutlineQuads[8*6];
 static int g_formPreviewSectorCache[8];
 static TextureVertex g_frameQuads[6];
 static TextureVertex g_plaqueQuads[6];
@@ -182,6 +183,7 @@ static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
 static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
 static Raw g_formPreviewTextures[24]{};
+static Raw g_formPreviewOutlineTextures[24]{};
 static DWord g_formPreviewForms[24]{};
 static Raw g_formPreviewDevice=nullptr;
 static unsigned g_formPreviewNext=0;
@@ -2188,21 +2190,6 @@ DWord item_class_color(rw05::Kind kind,unsigned iconId){
     if(iconId==rw14::Potion)return 0xffffdc70u; // warm yellow
     return 0xfff4f5f7u; // other
 }
-void draw_item_class_outline(float cx,float cy,float size,DWord color){
-    if(size<8.f)return;
-    const float half=size*.5f,halo=4.f,soft=2.5f,edge=1.6f;
-    const DWord glow=(color&0x00ffffffu)|0x58000000u;
-    const DWord bright=(color&0x00ffffffu)|0xd8000000u;
-    const float x=cx-half,y=cy-half;
-    mark_quad(x-halo,y-halo,size+halo*2.f,soft,glow);
-    mark_quad(x-halo,y+half*2.f+halo-soft,size+halo*2.f,soft,glow);
-    mark_quad(x-halo,y-halo,soft,size+halo*2.f,glow);
-    mark_quad(x+half*2.f+halo-soft,y-halo,soft,size+halo*2.f,glow);
-    mark_quad(x-edge,y-edge,size+edge*2.f,edge,bright);
-    mark_quad(x-edge,y+half*2.f-edge,size+edge*2.f,edge,bright);
-    mark_quad(x-edge,y-edge,edge,size+edge*2.f,bright);
-    mark_quad(x+half*2.f-edge,y-edge,edge,size+edge*2.f,bright);
-}
 void draw_wheel_pager(float cx,float cy,float outer,int wheel,float maxBottom){
     // Enlarged bottom-right page block: readable at 1440p and still legible at 1080p.
     const float panelW=96.f,panelH=g_showWheelOccupancy?62.f:42.f;
@@ -2288,7 +2275,7 @@ void release_theme(){
     drop(g_frameAtlas);g_frameAtlas=nullptr;
     drop(g_fontAtlas);g_fontAtlas=nullptr;
     drop(g_plaqueAtlas);g_plaqueAtlas=nullptr;
-    for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     g_atlasOwner=nullptr;g_iconAtlasChecked=0;
 }
@@ -2705,7 +2692,10 @@ void draw_labels(float width,float height){
                     previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);
                 g_formPreviewSectorCache[sector]=cacheSlot;
             }
-            draw_item_class_outline(x,y,visibleIconSize,item_class_color((rw05::Kind)b.kind,iconId));
+            if(hasItemPreview){
+                quad_tex(g_formPreviewOutlineQuads,sector*6,x-previewSize*.5f,y-previewSize*.5f,
+                    previewSize,previewSize,item_class_color((rw05::Kind)b.kind,iconId),0.f,0.f,1.f,1.f);
+            }
             if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
                 const unsigned next=rw20::preview_index(index,slot.count);
                 // Rounded-metal substrate in geometric pass; actual miniature is
@@ -2727,7 +2717,6 @@ void draw_labels(float width,float height){
             mark_quad(x-32.f,y-31.f,64.f,61.f,tinted(0x9b142333u));
             mark_quad(x-32.f,y+27.f,64.f,3.f,tinted(accent));
             draw_category_icon(x,y-6.f,(rw05::Kind)b.kind,accent);
-            draw_item_class_outline(x,y,66.f,item_class_color((rw05::Kind)b.kind,g_iconIndices[wheel][sector][index]));
         }
         // Count is not an additional artwork tile; always retain wheel stack semantics.
         if(slot.count>1){
@@ -2846,7 +2835,7 @@ void apply_presentation(float width,float height){
     for(int i=0;i<g_labelVert;++i)apply_to_vertex(g_labels[i],cx,cy,scale,opacity);
     for(int i=0;i<g_artVertexCount;++i)apply_to_vertex(g_artQuads[i],cx,cy,scale,opacity);
     for(int sector=0;sector<8;++sector)if(g_formPreviewSectorCache[sector]>=0)
-        for(int i=sector*6;i<sector*6+6;++i)apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);
+        for(int i=sector*6;i<sector*6+6;++i){apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);apply_to_vertex(g_formPreviewOutlineQuads[i],cx,cy,scale,opacity);}
     for(int i=0;i<6;++i){apply_to_vertex(g_frameQuads[i],cx,cy,scale,opacity);
                           apply_to_vertex(g_plaqueQuads[i],cx,cy,scale,opacity);}
     for(int i=0;i<g_fontVertexCount;++i)apply_to_vertex(g_fontQuads[i],cx,cy,scale,opacity);
@@ -2923,6 +2912,7 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord 
     const float scale=(cropW>cropH?(float)inner/(float)cropW:(float)inner/(float)cropH);
     const unsigned outW=(unsigned)(cropW*scale+.5f),outH=(unsigned)(cropH*scale+.5f);
     const unsigned offsetX=(side-outW)/2,offsetY=(side-outH)/2;
+    unsigned char alphaMask[side*side]{};
     for(unsigned y=0;y<outH;++y){
         const unsigned sy=minY+(unsigned)((float)y/scale);
         const unsigned char* srow=(const unsigned char*)src.bits+sy*(DWord)src.pitch;
@@ -2933,19 +2923,47 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord 
             const int delta=(255-(int)s[2])>(int)s[1]?(255-(int)s[2]):(int)s[1];
             const int diff=delta>(255-(int)s[0])?delta:(255-(int)s[0]);
             d[0]=s[0];d[1]=s[1];d[2]=s[2];d[3]=(unsigned char)(diff<0?0:(diff>64?255:diff*4));
+            alphaMask[(offsetY+y)*side+offsetX+x]=d[3];
         }
     }
     reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+    Raw outlineTexture=nullptr;
+    if(succeeded(reinterpret_cast<CreateTexture>(get(device,kCreateTexture))
+        (device,side,side,1,0,21,1,&outlineTexture,nullptr))&&outlineTexture){
+        LockedRectangle outlineDst{};
+        if(succeeded(reinterpret_cast<TextureLock>(get(outlineTexture,kLockTexture))(outlineTexture,0,&outlineDst,nullptr,0))&&
+           outlineDst.bits&&outlineDst.pitch>=(Long)(side*4u)){
+            for(unsigned y=0;y<side;++y){
+                unsigned char* row=(unsigned char*)outlineDst.bits+y*(UInit)outlineDst.pitch;
+                for(unsigned x=0;x<side;++x){
+                    const unsigned char own=alphaMask[y*side+x];unsigned char expanded=own;
+                    for(int oy=-3;oy<=3;++oy)for(int ox=-3;ox<=3;++ox){
+                        const int px=(int)x+ox,py=(int)y+oy;
+                        if(px<0||py<0||px>=(int)side||py>=(int)side)continue;
+                        const int distance=ox*ox+oy*oy;if(distance>10)continue;
+                        const unsigned char candidate=(unsigned char)((unsigned)alphaMask[(unsigned)py*side+(unsigned)px]*(distance<=2?220u:160u)/255u);
+                        if(candidate>expanded)expanded=candidate;
+                    }
+                    unsigned char* d=row+x*4u;d[0]=d[1]=d[2]=255;d[3]=expanded>own?(unsigned char)(expanded-own):0;
+                }
+            }
+            reinterpret_cast<TextureUnlock>(get(outlineTexture,kUnlockTexture))(outlineTexture,0);
+        }else{
+            if(outlineDst.bits)reinterpret_cast<TextureUnlock>(get(outlineTexture,kUnlockTexture))(outlineTexture,0);
+            drop(outlineTexture);outlineTexture=nullptr;
+        }
+    }
     reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
     if(g_formPreviewDevice!=device){
-        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
         g_formPreviewDevice=device;g_formPreviewNext=0;
     }
     int cacheSlot=-1;
     for(unsigned i=0;i<24;++i)if(g_formPreviewForms[i]==formId){cacheSlot=(int)i;break;}
     if(cacheSlot<0)for(unsigned i=0;i<24;++i)if(!g_formPreviewForms[i]){cacheSlot=(int)i;break;}
     if(cacheSlot<0)cacheSlot=(int)(g_formPreviewNext++%24u);
-    drop(g_formPreviewTextures[cacheSlot]);g_formPreviewTextures[cacheSlot]=texture;g_formPreviewForms[cacheSlot]=formId;
+    drop(g_formPreviewTextures[cacheSlot]);drop(g_formPreviewOutlineTextures[cacheSlot]);
+    g_formPreviewTextures[cacheSlot]=texture;g_formPreviewOutlineTextures[cacheSlot]=outlineTexture;g_formPreviewForms[cacheSlot]=formId;
     return 1;
 }
 bool inventory3d_model_matches(DWord wanted){
@@ -3071,14 +3089,14 @@ void finish_inventory_preview_capture(Raw device){
 }
 void clear_form_preview_cache(){
     for(unsigned i=0;i<24;++i){
-        Raw texture=g_formPreviewTextures[i];
+        Raw texture=g_formPreviewTextures[i];Raw outline=g_formPreviewOutlineTextures[i];
         g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;
-        drop(texture);
+        g_formPreviewOutlineTextures[i]=nullptr;drop(texture);drop(outline);
     }
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
 }
 int preview_cache_reset_fault(){
-    for(unsigned i=0;i<24;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    for(unsigned i=0;i<24;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     file_log("RunicWheelLE: preview cache reset faulted; remaining thumbnails will be ignored\r\n");
     return 1;
@@ -3365,6 +3383,11 @@ int draw(Raw device){
         ok=draw_textured_pass(device,g_iconAtlas,g_miniArtQuads,(UInit)(g_miniArtVert/3));
         if(ok && InterlockedCompareExchange(&g_previewLogged,1,0)==0)
             file_log("RunicWheelLE: v0.22 stack miniature LATE PASS rendered\r\n");
+    }
+    for(int sector=0;ok&&sector<8;++sector){
+        const int cacheSlot=g_formPreviewSectorCache[sector];
+        if(cacheSlot>=0&&g_formPreviewOutlineTextures[cacheSlot])
+            ok=draw_textured_pass(device,g_formPreviewOutlineTextures[cacheSlot],&g_formPreviewOutlineQuads[sector*6],2);
     }
     for(int sector=0;ok&&sector<8;++sector){
         const int cacheSlot=g_formPreviewSectorCache[sector];

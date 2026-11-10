@@ -249,7 +249,8 @@ void khaos_int_string(int n,char (&buffer)[24]){
     int j=0;if(n<0)buffer[j++]='-';while(count)buffer[j++]=temp[--count];buffer[j]=0;
 }
 bool khaos_apply(){
-    if(!g_khaosReady || !g_configPath[0] || !khaos_valid_draft()){g_khaosStatus=3;return false;}
+    if(!g_khaosReady || !g_configPath[0] || !khaos_valid_draft()){
+        g_khaosStatus=3;file_log("RunicWheelLE: KHAOS apply rejected (not ready, missing INI path, or invalid draft)\r\n");return false;}
     // Preserve all existing INI sections, especially user's [BindingsV2].
     // Only changed keys are written; no independent KHA-OS settings store.
     for(int i=0;i<kKhaosFieldCount;++i){
@@ -265,7 +266,7 @@ bool khaos_apply(){
         while(*a && *a==*b){++a;++b;}if(*a!=*b){
             char key[]="Wheel1Title";key[5]=(char)('1'+w);
             if(!WritePrivateProfileStringA("Controls",key,g_khaosTitles[w],g_configPath)){
-                g_khaosStatus=3;return false;
+                g_khaosStatus=3;file_log("RunicWheelLE: KHAOS title INI write FAILED\r\n");return false;
             }
         }
     }
@@ -426,8 +427,12 @@ void khaos_draw_menu(int width,int height){
     const char* status=g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":
         g_khaosStatus==3?"INVALID INPUT OR SAVE FAILED":g_khaosDirty?"UNSAVED CHANGES":"READY";
     khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
-    khaos_centered(d.x+d.w*.5f,by+21.f*s,22.f*s,d.w-25.f*s,14.f*s,
-        "ENTER APPLY  |  END RESET TAB  |  F6-F8 SAVE PROFILES  |  F9-F11 LOAD  |  ESC CLOSE",0xffe1e3dfu);
+    const float applyX=d.x+d.w-151.f*s,applyY=by+12.f*s,applyW=136.f*s,applyH=34.f*s;
+    khaos_rect(applyX,applyY,applyW,applyH,0xffa9874du);
+    khaos_rect(applyX+2.f*s,applyY+2.f*s,applyW-4.f*s,applyH-4.f*s,0xff202a34u);
+    khaos_centered(applyX+applyW*.5f,applyY+2.f*s,applyH-4.f*s,applyW-8.f*s,14.f*s,"SAVE / APPLY",0xffffe1a0u);
+    khaos_centered(d.x+(d.w-158.f*s)*.5f,by+16.f*s,24.f*s,d.w-166.f*s,12.f*s,
+        "ENTER APPLY | END RESET | F6-F11 PROFILES | ESC CLOSE",0xffe1e3dfu);
 }
 
 bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
@@ -446,7 +451,7 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
     if(msg==0x0100u){ // WM_KEYDOWN
         const int key=(int)wp;
         if(key==0x1b){InterlockedExchange(&g_khaosOpen,0);g_khaosDragging=0;return true;}
-        if(key==0x0d){khaos_apply();return true;}
+        if(key==0x0d){file_log("RunicWheelLE: KHAOS Enter received; applying settings\r\n");khaos_apply();return true;}
         if(key==0x08 && g_khaosTitleEdit<0){khaos_discard();return true;}
         // F5 belongs to Skyrim Quick Save. Never claim or bind it.
         if(key==0x23){khaos_reset_tab();return true;} // End resets this tab.
@@ -528,6 +533,10 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
         }
         if(y>=d.y+63.f*d.scale && y<=d.y+108.f*d.scale && x>=d.x && x<d.x+d.w){
             int t=(int)((x-d.x)/(d.w/8.f));if(t>=0&&t<8){g_khaosTab=t;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;}return true;
+        }
+        const float applyX=d.x+d.w-151.f*d.scale,applyY=d.y+d.h-56.f*d.scale;
+        if(rw25::contains({applyX,applyY,136.f*d.scale,34.f*d.scale},x,y)){
+            file_log("RunicWheelLE: KHAOS Save / Apply button clicked\r\n");khaos_apply();return true;
         }
         if(g_khaosTab==2 && d.previewX<d.x+d.w && x>=d.previewX && y>=d.y+519.f*d.scale && y<d.y+602.f*d.scale){
             int t=(int)((y-(d.y+519.f*d.scale))/(23.f*d.scale));
