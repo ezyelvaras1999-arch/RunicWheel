@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-FormID-memory-preview"
+#define RUNIC_VERSION "0.26.0-wheel-lock-class-highlights"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -187,6 +187,7 @@ static Raw g_formPreviewDevice=nullptr;
 static unsigned g_formPreviewNext=0;
 static volatile Long g_previewClearActive=0, g_inventoryRenderBridgeHooked=0;
 static volatile Long g_previewBackupFailureLogged=0;
+static volatile Long g_previewCacheResetPending=0;
 static int g_firstThemeEnabled=1;
 static volatile Long g_feedback=0, g_feedbackTick=0;
 // Only these timestamps/flags cross input and Present threads. No TESV calls during rendering.
@@ -650,6 +651,8 @@ static volatile Long g_khaosOpen=0;
 static int g_gamepadDeadzonePercent=22;
 static int g_pageCount=3,g_sectorCount=8; // UI capacity, hidden entries kept in RWL2
 static int g_offsetX=0,g_offsetY=0,g_iconScalePercent=100,g_textScalePercent=100;
+static int g_weaponPreviewSizePercent=115;
+static int g_blockMenuHotkeys=1,g_inventoryMenuScanCode=23,g_tweenMenuScanCode=15,g_favoritesScanCode=16;
 static int g_khaosFontOverride=0;
 static int g_visualAccentR=219,g_visualAccentG=186,g_visualAccentB=125;
 static int g_backgroundStrength=88,g_showDecorativeFrame=1;
@@ -1155,9 +1158,32 @@ void perform_action(const ActionRequest& request){
           action_diagnostic("RunicWheelLE: equipped weapon state not available\r\n",4);return;
         }
         Raw equipped=*((Raw*)((unsigned char*)process+0x68)+ (request.hand==0?0:1));
+        Raw otherSlot=reinterpret_cast<Raw (__cdecl*)()>(request.hand==0?0x0054C840:0x0054C810)();
+        if(!readable(otherSlot,4,0)){action_diagnostic("RunicWheelLE: opposite hand slot unavailable\r\n",4);return;}
+        Raw equippedOther=*((Raw*)((unsigned char*)process+0x68)+ (request.hand==0?1:0));
         int wornIndex=-1;
         for(int i=0;i<owned.lists;++i)
             if(request.hand==0?owned.info[i].wornLeft:owned.info[i].wornRight){wornIndex=i;break;}
+        int oppositeWornIndex=-1;
+        for(int i=0;i<owned.lists;++i)
+            if(request.hand==0?owned.info[i].wornRight:owned.info[i].wornLeft){oppositeWornIndex=i;break;}
+        if(choice.pick==rw26::PickList&&choice.index>=0&&choice.index<owned.lists&&
+           (request.hand==0?owned.info[choice.index].wornRight:owned.info[choice.index].wornLeft))
+            oppositeWornIndex=choice.index;
+        const bool sameBoundInstanceOpposite=choice.pick==rw26::PickList?
+            (oppositeWornIndex<0||oppositeWornIndex==choice.index):
+            (choice.pick==rw26::PickPlain&&owned.count==1);
+        if(kind==rw05::Weapon && equipped!=form && equippedOther==form && sameBoundInstanceOpposite){
+            if(oppositeWornIndex<0||!owned.list[oppositeWornIndex]){
+                action_diagnostic("RunicWheelLE: cannot identify the opposite-hand weapon instance; refused duplicate equip\r\n",4);return;
+            }
+            Raw movedInstance=choice.pick==rw26::PickList?target:owned.list[oppositeWornIndex];
+            const bool removed=reinterpret_cast<GameUnequip>(0x006EE560)
+                (manager,actor,form,owned.list[oppositeWornIndex],1,otherSlot,true,false,true,false,nullptr);
+            if(!removed){action_diagnostic("RunicWheelLE: opposite-hand weapon could not be unequipped; duplicate equip refused\r\n",4);return;}
+            reinterpret_cast<GameEquip>(0x006EF3E0)(manager,actor,form,movedInstance,1,slot,true,false,false,nullptr);
+            action_diagnostic("RunicWheelLE: moved the same weapon instance to the requested hand\r\n",3);return;
+        }
         const rw26::Move move=rw26::hand_move(choice,owned.info,owned.lists,equipped==form,wornIndex);
         if(move==rw26::MoveRefuse){action_diagnostic("RunicWheelLE: exact worn instance missing\r\n",4);return;}
         if(move==rw26::MoveUnequip){
@@ -1378,6 +1404,10 @@ void load_config(){
     g_cfg.leftClickRightHand=value("LeftClickEquipsRightHand",1,0,1);
     g_cfg.inputDiagnostics=value("EnableInputDiagnostics",0,0,1);
     g_cfg.closeKey=value("CloseKeyboardScanCode",1,0,255);
+    g_blockMenuHotkeys=value("BlockMenuHotkeysWhileOpen",1,0,1);
+    g_inventoryMenuScanCode=value("InventoryMenuScanCode",23,0,255);
+    g_tweenMenuScanCode=value("TweenMenuScanCode",15,0,255);
+    g_favoritesScanCode=value("FavoritesScanCode",16,0,255);
     if(g_cfg.closeKey>=0x3C && g_cfg.closeKey<=0x3F){
         g_cfg.closeKey=1;
         file_log("RunicWheelLE: reserved function key CLOSE binding ignored (F2-F5)\r\n");
@@ -1407,6 +1437,7 @@ void load_config(){
     g_offsetX=value("WheelOffsetXPercent",0,-35,35);
     g_offsetY=value("WheelOffsetYPercent",0,-30,30);
     g_iconScalePercent=value("IconSizePercent",100,65,145);
+    g_weaponPreviewSizePercent=value("WeaponPreviewSizePercent",115,85,150);
     g_textScalePercent=value("TextScalePercent",100,65,150);
     g_visualAccentR=value("AccentRed",219,0,255);
     g_visualAccentG=value("AccentGreen",186,0,255);
@@ -1870,6 +1901,10 @@ int process_event(InputEvent* event){
             }
         }
         if(key && b->scan==(DWord)g_cfg.closeKey && down && g_activation.visible){close_wheel();return 1;}
+        if(key && g_activation.visible && g_blockMenuHotkeys && !inventory_context() &&
+           ((g_inventoryMenuScanCode && b->scan==(DWord)g_inventoryMenuScanCode) ||
+            (g_tweenMenuScanCode && b->scan==(DWord)g_tweenMenuScanCode) ||
+            (g_favoritesScanCode && b->scan==(DWord)g_favoritesScanCode)))return 1;
         if(g_cfg.suppress && (visibleBefore||g_activation.visible)) {
            if(mouse && (b->scan==(DWord)g_cfg.primaryMouse||b->scan==(DWord)g_cfg.secondaryMouse||b->scan==(DWord)g_cfg.wheelUp||b->scan==(DWord)g_cfg.wheelDown||b->scan==(DWord)g_cfg.prevMouse||b->scan==(DWord)g_cfg.nextMouse))return 1;
            if(key && ((g_quickSectorKeys && b->scan>=2u && b->scan<=9u) ||
@@ -2145,6 +2180,28 @@ void mark_quad(float x,float y,float width,float height,DWord col){
     Vertex& d=g_labels[g_labelVert++];vertex(d,x,y,col);
     Vertex& e=g_labels[g_labelVert++];vertex(e,x+width,y+height,col);
     Vertex& f=g_labels[g_labelVert++];vertex(f,x,y+height,col);
+}
+DWord item_class_color(rw05::Kind kind,unsigned iconId){
+    if(kind==rw05::Weapon)return 0xffff8585u; // light red
+    if(kind==rw05::Armor)return 0xff83d5ffu;  // light blue
+    if(iconId==rw14::Food)return 0xff8fffb0u; // light green
+    if(iconId==rw14::Potion)return 0xffffdc70u; // warm yellow
+    return 0xfff4f5f7u; // other
+}
+void draw_item_class_outline(float cx,float cy,float size,DWord color){
+    if(size<8.f)return;
+    const float half=size*.5f,halo=4.f,soft=2.5f,edge=1.6f;
+    const DWord glow=(color&0x00ffffffu)|0x58000000u;
+    const DWord bright=(color&0x00ffffffu)|0xd8000000u;
+    const float x=cx-half,y=cy-half;
+    mark_quad(x-halo,y-halo,size+halo*2.f,soft,glow);
+    mark_quad(x-halo,y+half*2.f+halo-soft,size+halo*2.f,soft,glow);
+    mark_quad(x-halo,y-halo,soft,size+halo*2.f,glow);
+    mark_quad(x+half*2.f+halo-soft,y-halo,soft,size+halo*2.f,glow);
+    mark_quad(x-edge,y-edge,size+edge*2.f,edge,bright);
+    mark_quad(x-edge,y+half*2.f-edge,size+edge*2.f,edge,bright);
+    mark_quad(x-edge,y-edge,edge,size+edge*2.f,bright);
+    mark_quad(x+half*2.f-edge,y-edge,edge,size+edge*2.f,bright);
 }
 void draw_wheel_pager(float cx,float cy,float outer,int wheel,float maxBottom){
     // Enlarged bottom-right page block: readable at 1440p and still legible at 1080p.
@@ -2635,13 +2692,20 @@ void draw_labels(float width,float height){
             int cacheSlot=-1;
             for(int ci=0;ci<24;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
             const bool hasItemPreview=b.kind!=rw05::Spell&&cacheSlot>=0&&g_formPreviewTextures[cacheSlot];
-            if(!hasItemPreview)add_art_icon(x,y,g_iconIndices[wheel][sector][index],sector_weight(sector),outer);
+            const unsigned iconId=g_iconIndices[wheel][sector][index];
+            float visibleIconSize=outer*.398f;
+            if(visibleIconSize>181.f)visibleIconSize=181.f;
+            visibleIconSize*=((float)g_iconScalePercent/100.f)*(1.f+.055f*sector_weight(sector));
+            if(!hasItemPreview)add_art_icon(x,y,iconId,sector_weight(sector),outer);
             if(hasItemPreview){
-                const float previewSize=outer*.34f;int q=sector*6;
+                float previewSize=outer*.34f*(b.kind==rw05::Weapon?(float)g_weaponPreviewSizePercent/100.f:1.f);
+                if(previewSize>181.f)previewSize=181.f;
+                visibleIconSize=previewSize;int q=sector*6;
                 quad_tex(g_formPreviewQuads,q,x-previewSize*.5f,y-previewSize*.5f,
                     previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);
                 g_formPreviewSectorCache[sector]=cacheSlot;
             }
+            draw_item_class_outline(x,y,visibleIconSize,item_class_color((rw05::Kind)b.kind,iconId));
             if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
                 const unsigned next=rw20::preview_index(index,slot.count);
                 // Rounded-metal substrate in geometric pass; actual miniature is
@@ -2663,6 +2727,7 @@ void draw_labels(float width,float height){
             mark_quad(x-32.f,y-31.f,64.f,61.f,tinted(0x9b142333u));
             mark_quad(x-32.f,y+27.f,64.f,3.f,tinted(accent));
             draw_category_icon(x,y-6.f,(rw05::Kind)b.kind,accent);
+            draw_item_class_outline(x,y,66.f,item_class_color((rw05::Kind)b.kind,g_iconIndices[wheel][sector][index]));
         }
         // Count is not an additional artwork tile; always retain wheel stack semantics.
         if(slot.count>1){
@@ -2991,7 +3056,10 @@ void finish_inventory_preview_capture(Raw device){
     if(!restoreReady){
         InterlockedExchange(&g_previewCapturePending,0);
         file_log("RunicWheelLE: CRITICAL menu-render frame restore failed\r\n");
-    }else if(captureReady&&cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
+    }else if(!InterlockedCompareExchange(&g_previewCapturePending,0,0)){
+        // A save transition cancelled this request while the inventory model was rendering.
+    }else if(captureReady&&InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
+        cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
         (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0))){
         InterlockedExchange(&g_previewCapturePending,0);
         file_log("RunicWheelLE: compact FormID thumbnail cached in memory; original screen restored and no image file written\r\n");
@@ -3000,6 +3068,25 @@ void finish_inventory_preview_capture(Raw device){
         file_log("RunicWheelLE: no isolated model pixels found after three attempts; no thumbnail cached\r\n");
     }
     drop(captured);drop(back);
+}
+void clear_form_preview_cache(){
+    for(unsigned i=0;i<24;++i){
+        Raw texture=g_formPreviewTextures[i];
+        g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;
+        drop(texture);
+    }
+    g_formPreviewDevice=nullptr;g_formPreviewNext=0;
+}
+int preview_cache_reset_fault(){
+    for(unsigned i=0;i<24;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    g_formPreviewDevice=nullptr;g_formPreviewNext=0;
+    file_log("RunicWheelLE: preview cache reset faulted; remaining thumbnails will be ignored\r\n");
+    return 1;
+}
+void guarded_preview_cache_reset(){
+    if(!InterlockedExchange(&g_previewCacheResetPending,0))return;
+    __try {clear_form_preview_cache();file_log("RunicWheelLE: FormID thumbnail cache cleared for new/load game\r\n");}
+    __except(preview_cache_reset_fault()){}
 }
 int preview_probe_fault(){
     if(InterlockedExchange(&g_previewClearActive,0)){
@@ -3342,6 +3429,7 @@ void guarded_frame(Raw device){
 }
 HResult W on_present(Raw device,const Rectangle* src,const Rectangle* dst,Handle wnd,const void* dirty){
     InterlockedExchange(&g_presentCalls,g_presentCalls+1); // render thread is the only writer
+    guarded_preview_cache_reset(); // D3D resources are released on the render thread, not SKSE messaging thread.
     guarded_preview_probe(device); // copy the inventory frame before the wheel overlay
     guarded_frame(device);
     schedule_type_refresh();
@@ -3396,6 +3484,9 @@ void try_install(){
 void messages_body(SKSEMessagingInterface::Message* msg){
     if(!msg)return;
     if(msg->type==SKSEMessagingInterface::kMessage_NewGame || msg->type==SKSEMessagingInterface::kMessage_PreLoadGame){
+        InterlockedExchange(&g_previewCacheResetPending,1);
+        InterlockedExchange(&g_previewCapturePending,0);
+        InterlockedExchange(&g_previewCaptureForm,0);
         InterlockedExchange(&g_pendingReset,1);
         InterlockedExchange(&g_actionGeneration,InterlockedCompareExchange(&g_actionGeneration,0,0)+1);
         InterlockedExchange(&g_visible,0);
@@ -3404,6 +3495,8 @@ void messages_body(SKSEMessagingInterface::Message* msg){
         InterlockedExchange(&g_resetInput,1);
         if(msg->type==SKSEMessagingInterface::kMessage_NewGame)queue_state(g_defaultState);
     }
+    if(msg->type==SKSEMessagingInterface::kMessage_PostLoadGame)
+        InterlockedExchange(&g_previewCacheResetPending,1);
     if(msg->type==SKSEMessagingInterface::kMessage_DataLoaded || msg->type==SKSEMessagingInterface::kMessage_PostLoadGame || msg->type==SKSEMessagingInterface::kMessage_InputLoaded){
         format_thread_log("RunicWheelLE: SKSE message callback thread ");
         try_install();
