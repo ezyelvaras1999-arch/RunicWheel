@@ -2693,7 +2693,8 @@ void draw_labels(float width,float height){
                 g_formPreviewSectorCache[sector]=cacheSlot;
             }
             if(hasItemPreview){
-                quad_tex(g_formPreviewOutlineQuads,sector*6,x-previewSize*.5f,y-previewSize*.5f,
+                int outlineQuad=sector*6;
+                quad_tex(g_formPreviewOutlineQuads,outlineQuad,x-previewSize*.5f,y-previewSize*.5f,
                     previewSize,previewSize,item_class_color((rw05::Kind)b.kind,iconId),0.f,0.f,1.f,1.f);
             }
             if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
