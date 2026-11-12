@@ -4,7 +4,7 @@
 // Copyright (c) 2026 Mhacks79. No third-party game/mod assets or Wheeler source.
 // Uses the official SKSE 1.7.3 header for ABI; only Win32 C and D3D9 COM interfaces cross DLL boundaries.
 // Native equipment actions gated by ownership/variant checks and executed on SKSE game tasks.
-#define RUNIC_VERSION "0.26.0-wheel-lock-class-highlights"
+#define RUNIC_VERSION "0.26.0-persisted-previews-inventory-counts"
 #include "InputLogic.h"
 #include "LayoutGeometry.h"
 #include "KhaosAPI.h"
@@ -185,11 +185,16 @@ static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
 static Raw g_formPreviewTextures[24]{};
 static Raw g_formPreviewOutlineTextures[24]{};
 static DWord g_formPreviewForms[24]{};
+static constexpr unsigned kFormPreviewSide=128u;
+static constexpr unsigned kFormPreviewBytes=kFormPreviewSide*kFormPreviewSide*4u;
+static NativeSRWLock g_previewDataLock{};
+static unsigned char g_formPreviewPixels[24][kFormPreviewBytes]{};
+static DWord g_formPreviewPixelForms[24]{};
 static Raw g_formPreviewDevice=nullptr;
 static unsigned g_formPreviewNext=0;
 static volatile Long g_previewClearActive=0, g_inventoryRenderBridgeHooked=0;
 static volatile Long g_previewBackupFailureLogged=0;
-static volatile Long g_previewCacheResetPending=0;
+static volatile Long g_previewCacheResetPending=0,g_previewCacheClearPixels=0;
 static int g_firstThemeEnabled=1;
 static volatile Long g_feedback=0, g_feedbackTick=0;
 // Only these timestamps/flags cross input and Present threads. No TESV calls during rendering.
@@ -203,6 +208,8 @@ static float g_focusBlend=1.f;
 // Presentation-only cache: game-thread copies fixed-size names, renderer reads under catalog lock.
 static char g_displayNames[rw05::Wheels][rw05::Sectors][rw05::Capacity][rw12ui::NameBytes]{};
 static unsigned char g_iconIndices[rw05::Wheels][rw05::Sectors][rw05::Capacity]{};
+static Long g_inventoryQuantities[rw05::Wheels][rw05::Sectors][rw05::Capacity]{};
+static volatile Long g_lastInventoryRefreshTick=0;
 static volatile Long g_namesEnabled=1, g_namesReported=0;
 static volatile Long g_namesResolved=0;
 static int g_showNames=1;
@@ -238,6 +245,8 @@ static int g_slowPercent=10;
 constexpr UInt32 kSaveRecord=0x45485752u; // 'RWHE' little-endian
 constexpr UInt32 kSaveUnique=0x314C5752u; // 'RWL1' unique id
 constexpr UInt32 kSaveVersion=2;
+constexpr UInt32 kPreviewSaveRecord=0x50565752u; // 'RWVP' little-endian
+constexpr UInt32 kPreviewSaveVersion=1;
 static char g_logPath[270];
 static char g_configPath[270];
 static int g_logReady=0;
@@ -744,6 +753,7 @@ void select_next_occupied(int direction){
     if(next!=sector){InterlockedExchange(&g_select,(Long)next);select_current();}
 }
 void snapshot_state_locked(rw05::State& state);
+void publish_state_locked(const rw05::State& state);
 // Native operations are always deferred to the SKSE game task queue.
 // No TESV equipment call is permitted from DirectX9, the UI callback or the input hook.
 struct ActionRequest {rw05::Binding binding{}; unsigned generation=0; int hand=0;};
@@ -822,7 +832,7 @@ constexpr int kMaxCopies=64;
 // Every extra list of the player's entry for one FormID: each tempered, enchanted or
 // renamed copy has its own, plain copies share one or have none (base count + delta).
 struct OwnedItem {
-    int count=0;Raw wornRight=nullptr,wornLeft=nullptr;bool duplicateEntry=false;
+    int count=0;Raw wornRight=nullptr,wornLeft=nullptr;bool duplicateEntry=false,countKnown=false;
     int lists=0;Raw list[kMaxCopies]{};rw26::InstanceInfo info[kMaxCopies]{};
 };
 // Inventory ownership is BASE TESNPC count + ExtraContainerChanges countDelta.
@@ -911,10 +921,12 @@ bool owned_inventory(Raw actor,Raw form,OwnedItem& out,bool quiet=false){
         if(i==2047 && node)return false;
       }
     }
-    if(!rw121::merge_inventory_count(count.base,count.delta,count.total))return false;
-    out.count=count.total;
+    if(count.base<0||count.base>100000||count.delta < -100000||count.delta>100000)return false;
+    count.total=count.base+count.delta;
+    if(count.total<0||count.total>100000)return false;
+    out.count=count.total;out.countKnown=true;
     if(count.base>0 && !quiet)file_log("RunicWheelLE: ownership resolved with TESNPC base+delta inventory\r\n");
-    return true;
+    return count.total>0;
 }
 // The name a one-list inventory row would show for this copy (list==nullptr: the base
 // name). This is the engine's own InventoryEntryData::GenerateName on a stack entry
@@ -1261,24 +1273,57 @@ int cache_names_fault(){
 void fill_names_on_game_thread(){
     if(!native_sites_verified())return;
     const int canRead=g_showNames && InterlockedCompareExchange(&g_namesEnabled,0,0) && name_lookup_signature_ok();
-    int resolved=0;
+    int resolved=0;bool inventoryPruned=false;
     Raw actor=readable((Raw)0x01B2E8E4,4,0)?*(Raw*)0x01B2E8E4:nullptr;
     if(!readable(actor,0x140,0))actor=nullptr;
     AcquireSRWLockExclusive(&g_catalogLock);
     __try {
         for(unsigned w=0;w<rw05::Wheels;++w)for(unsigned sector=0;sector<rw05::Sectors;++sector){
             rw05::Slot& slot=g_model.slot[w][sector];
-            for(unsigned i=0;i<rw05::Capacity;++i){
+            for(unsigned i=0;i<rw05::Capacity;){
                 char* name=g_displayNames[w][sector][i];
                 name[0]=0; // Never display names of removed or replaced bindings.
                 g_iconIndices[w][sector][i]=rw14::Misc;
-                if(i>=slot.count)continue;
+                g_inventoryQuantities[w][sector][i]=-1;
+                if(i>=slot.count){++i;continue;}
                 rw05::Binding& b=slot.item[i];
-                if(!b.formId)continue;
+                if(!b.formId){++i;continue;}
                 Raw form=reinterpret_cast<Raw (__cdecl*)(DWord)>(0x00451A30)(b.formId);
-                if(!readable(form,0x14,0)||*(DWord*)((unsigned char*)form+0x0C)!=b.formId)continue;
+                if(!readable(form,0x14,0)||*(DWord*)((unsigned char*)form+0x0C)!=b.formId){++i;continue;}
                 const unsigned formType=*((const unsigned char*)form+0x12);
                 if(!b.kind)b.kind=(unsigned char)form_kind(formType);
+                const bool inventoryItem=formType!=0x16&&formType!=0x77;
+                bool removeBinding=false;int quantity=-1;
+                if(inventoryItem&&actor){
+                    OwnedItem owned{};(void)owned_inventory(actor,form,owned,true);
+                    if(owned.countKnown){
+                        quantity=owned.count;
+                        if(b.variantId&&instance_sites_verified()){
+                            unsigned baseHash=0;const rw26::Choice choice=resolve_copy(form,b.formId,b.variantId,owned,baseHash);
+                            if(choice.pick==rw26::PickNone)quantity=0;
+                            else if(choice.pick==rw26::PickList&&choice.index>=0&&choice.index<owned.lists)
+                                quantity=owned.info[choice.index].count;
+                            else if(choice.pick==rw26::PickPlain){
+                                for(int ci=0;ci<owned.lists;++ci)if(owned.info[ci].customized)quantity-=owned.info[ci].count;
+                                if(quantity<0)quantity=0;
+                            }
+                        }
+                        removeBinding=quantity==0;
+                        if(b.kind!=rw05::Weapon&&b.kind!=rw05::Armor&&b.kind!=rw05::Spell&&b.kind!=rw05::Shout)
+                            g_inventoryQuantities[w][sector][i]=quantity;
+                    }
+                }
+                if(removeBinding){
+                    const unsigned oldCount=slot.count;rw05::remove(slot,(int)i);
+                    unsigned cursor=g_model.cursor[w][sector];
+                    if(!slot.count)cursor=0;else if(i<cursor)--cursor;else if(cursor>=slot.count)cursor=slot.count-1;
+                    g_model.cursor[w][sector]=(unsigned char)cursor;
+                    for(unsigned j=i;j<oldCount&&j<rw05::Capacity;++j){
+                        g_displayNames[w][sector][j][0]=0;g_inventoryQuantities[w][sector][j]=-1;
+                        g_iconIndices[w][sector][j]=rw14::Misc;
+                    }
+                    inventoryPruned=true;continue;
+                }
                 // SKSE LE GameObjects.h: WEAP.gameData.type at 0xF1;
                 // ARMO.bipedObject.data.parts at 0xE4; ALCH.itemData.flags at 0xA8;
                 // AMMO.settings.flags at 0x90. Only on game task, after bounds checks.
@@ -1300,9 +1345,11 @@ void fill_names_on_game_thread(){
                         if(name[0])++resolved;
                     }
                 }
+                ++i;
             }
         }
         InterlockedExchange(&g_refreshNeeded,0);
+        if(inventoryPruned){publish_state_locked(g_model);resolved=0;}
         InterlockedExchange(&g_namesResolved,resolved);
     }__finally {ReleaseSRWLockExclusive(&g_catalogLock);}
 }
@@ -1323,7 +1370,7 @@ void __fastcall dispose_type_refresh(TypeRefreshTask*,void*){
 static Raw g_typeRefreshVtable[2]={(Raw)&run_type_refresh,(Raw)&dispose_type_refresh};
 static TypeRefreshTask g_typeRefreshTask{g_typeRefreshVtable};
 void schedule_type_refresh(){
-    if(!g_tasks || !g_tasks->AddTask || !g_visible ||
+    if(!g_tasks || !g_tasks->AddTask ||
        !InterlockedCompareExchange(&g_refreshNeeded,0,0) ||
        InterlockedCompareExchange(&g_pendingApply,0,0))return;
     if(InterlockedCompareExchange(&g_refreshQueued,1,0)!=0)return;
@@ -1504,6 +1551,8 @@ void snapshot_state_locked(rw05::State& state){
 void publish_state_locked(const rw05::State& state){
     g_model=state;
     g_catalog={};
+    for(unsigned w=0;w<rw05::Wheels;++w)for(unsigned s=0;s<rw05::Sectors;++s)
+        for(unsigned i=0;i<rw05::Capacity;++i)g_inventoryQuantities[w][s][i]=-1;
     for(int w=0;w<rw03::Wheels;++w)for(int sec=0;sec<rw03::Slots;++sec){
         const rw05::Slot& slot=state.slot[w][sec];
         rw03::Slot& projected=g_catalog.slots[w][sec];
@@ -1686,11 +1735,50 @@ void save_impl(SKSESerializationInterface* serial){
     if(!serial->WriteRecord(kSaveRecord,kSaveVersion,bytes,rw05::PacketBytes))
         file_log("RunicWheelLE: SKSE co-save write FAILED\r\n");
     else file_log("RunicWheelLE: SKSE co-save record WRITTEN\r\n");
+    unsigned char previewRecord[8+kFormPreviewBytes];
+    for(unsigned cache=0;cache<24;++cache){
+        DWord cachedForm=0;AcquireSRWLockShared(&g_previewDataLock);
+        cachedForm=g_formPreviewPixelForms[cache];
+        if(cachedForm){
+            rw04::put32(previewRecord,cachedForm);rw04::put32(previewRecord+4,kFormPreviewBytes);
+            for(unsigned b=0;b<kFormPreviewBytes;++b)previewRecord[8+b]=g_formPreviewPixels[cache][b];
+        }
+        ReleaseSRWLockShared(&g_previewDataLock);
+        if(!cachedForm)continue;
+        bool bound=false;
+        for(unsigned w=0;w<rw05::Wheels&&!bound;++w)for(unsigned s=0;s<rw05::Sectors&&!bound;++s){
+            const rw05::Slot& slot=snapshot.slot[w][s];
+            for(unsigned i=0;i<slot.count;++i)if(slot.item[i].formId==cachedForm){bound=true;break;}
+        }
+        if(bound&&!serial->WriteRecord(kPreviewSaveRecord,kPreviewSaveVersion,previewRecord,sizeof(previewRecord)))
+            file_log("RunicWheelLE: preview thumbnail co-save write FAILED\r\n");
+    }
 }
 void load_impl(SKSESerializationInterface* serial){
     if(!serial||!serial->GetNextRecordInfo||!serial->ReadRecordData)return;
+    AcquireSRWLockExclusive(&g_previewDataLock);
+    for(unsigned i=0;i<24;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
+    ReleaseSRWLockExclusive(&g_previewDataLock);
+    InterlockedExchange(&g_previewCacheClearPixels,0);InterlockedExchange(&g_previewCacheResetPending,1);
     UInt32 record=0,version=0,length=0;
     while(serial->GetNextRecordInfo(&record,&version,&length)){
+        if(record==kPreviewSaveRecord){
+            if(version!=kPreviewSaveVersion||length!=8+kFormPreviewBytes)continue;
+            unsigned char previewRecord[8+kFormPreviewBytes];
+            if(serial->ReadRecordData(previewRecord,length)!=length)continue;
+            const DWord saved=rw04::get32(previewRecord),bytes=rw04::get32(previewRecord+4);
+            unsigned mapped=0;if(!saved||bytes!=kFormPreviewBytes||!resolve_saved_form(saved,&mapped,serial)||!mapped)continue;
+            AcquireSRWLockExclusive(&g_previewDataLock);
+            unsigned target=24;
+            for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==mapped){target=i;break;}
+            if(target==24)for(unsigned i=0;i<24;++i)if(!g_formPreviewPixelForms[i]){target=i;break;}
+            if(target<24){
+                for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[target][b]=previewRecord[8+b];
+                g_formPreviewPixelForms[target]=mapped;
+            }
+            ReleaseSRWLockExclusive(&g_previewDataLock);
+            continue;
+        }
         if(record!=kSaveRecord || (version!=1 && version!=kSaveVersion) ||
            (version==1 && length!=rw04::kBytes) || (version==2 && length!=rw05::PacketBytes))continue;
         unsigned char data[rw05::PacketBytes]{};
@@ -1704,7 +1792,14 @@ void load_impl(SKSESerializationInterface* serial){
         else file_log("RunicWheelLE: per-save wheel state loaded\r\n");
     }
 }
-void revert_impl(SKSESerializationInterface*){queue_state(g_defaultState);file_log("RunicWheelLE: SKSE co-save REVERT requested\r\n");}
+void revert_impl(SKSESerializationInterface*){
+    queue_state(g_defaultState);
+    AcquireSRWLockExclusive(&g_previewDataLock);
+    for(unsigned i=0;i<24;++i)g_formPreviewPixelForms[i]=0;
+    ReleaseSRWLockExclusive(&g_previewDataLock);
+    InterlockedExchange(&g_previewCacheClearPixels,1);InterlockedExchange(&g_previewCacheResetPending,1);
+    file_log("RunicWheelLE: SKSE co-save REVERT requested\r\n");
+}
 int serialization_fault(){
     file_log("RunicWheelLE: SEH in SKSE co-save callback; record ignored\r\n");
     return 1;
@@ -2169,6 +2264,8 @@ static const Glyph kGlyphs[]={
  {'?',{14,17,1,2,4,0,4}},{' ',{0,0,0,0,0,0,0}}
 };
 static int g_labelVert=0;
+static Vertex g_quantityLabels[8*12];
+static int g_quantityLabelVert=0;
 void text_at(float midX,float capMid,float width,float fontPx,const char* raw,DWord col);
 void text_in(float midX,float boxY,float boxH,float width,float fontPx,const char* raw,DWord col,float fill=.62f);
 float text_width(float fontPx,const char* raw);
@@ -2182,6 +2279,15 @@ void mark_quad(float x,float y,float width,float height,DWord col){
     Vertex& d=g_labels[g_labelVert++];vertex(d,x,y,col);
     Vertex& e=g_labels[g_labelVert++];vertex(e,x+width,y+height,col);
     Vertex& f=g_labels[g_labelVert++];vertex(f,x,y+height,col);
+}
+void quantity_quad(float x,float y,float width,float height,DWord col){
+    if(g_quantityLabelVert+6>(int)(sizeof(g_quantityLabels)/sizeof(g_quantityLabels[0])))return;
+    Vertex& a=g_quantityLabels[g_quantityLabelVert++];vertex(a,x,y,col);
+    Vertex& b=g_quantityLabels[g_quantityLabelVert++];vertex(b,x+width,y,col);
+    Vertex& c=g_quantityLabels[g_quantityLabelVert++];vertex(c,x+width,y+height,col);
+    Vertex& d=g_quantityLabels[g_quantityLabelVert++];vertex(d,x,y,col);
+    Vertex& e=g_quantityLabels[g_quantityLabelVert++];vertex(e,x+width,y+height,col);
+    Vertex& f=g_quantityLabels[g_quantityLabelVert++];vertex(f,x,y+height,col);
 }
 DWord item_class_color(rw05::Kind kind,unsigned iconId){
     if(kind==rw05::Weapon)return 0xffff8585u; // light red
@@ -2543,7 +2649,7 @@ Nameplate nameplate(float width,float height,float cx,float cy,float outer,const
     return p;
 }
 void draw_labels(float width,float height){
-    g_labelVert=0;g_artVertexCount=0;g_miniArtVert=0;g_miniCount=0;g_fontVertexCount=0;
+    g_labelVert=0;g_quantityLabelVert=0;g_artVertexCount=0;g_miniArtVert=0;g_miniCount=0;g_fontVertexCount=0;
     for(int i=0;i<8;++i)g_formPreviewSectorCache[i]=-1;
     const float d=width<height?width:height;
     float outer=d*.31f*(float)g_cfg.wheelScale/100.f;
@@ -2667,6 +2773,7 @@ void draw_labels(float width,float height){
         const DWord accent=b.kind==rw05::Weapon?0xffffd69au:
           b.kind==rw05::Armor?0xffc0e0ffu:b.kind==rw05::Spell?0xffc9b8ffu:
           b.kind==rw05::Consumable?0xff98edc7u:b.kind==rw05::Ammo?0xffffe4a4u:0xffe2cee8u;
+        float itemArtSize=66.f;
         if(g_magicSchoolAccents && b.kind==rw05::Spell){
             const unsigned id=g_iconIndices[wheel][sector][index];
             const DWord tint=id==rw14::Alteration?0xff89d4ffu:
@@ -2676,18 +2783,20 @@ void draw_labels(float width,float height){
             mark_quad(x-27.f,y+outer*.173f,54.f,2.6f,tinted(tint));
         }
         if(g_iconAtlas && g_firstThemeEnabled){
-            int cacheSlot=-1;
+        int cacheSlot=-1;
             for(int ci=0;ci<24;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
             const bool hasItemPreview=b.kind!=rw05::Spell&&cacheSlot>=0&&g_formPreviewTextures[cacheSlot];
             const unsigned iconId=g_iconIndices[wheel][sector][index];
             float visibleIconSize=outer*.398f;
             if(visibleIconSize>181.f)visibleIconSize=181.f;
             visibleIconSize*=((float)g_iconScalePercent/100.f)*(1.f+.055f*sector_weight(sector));
+            itemArtSize=visibleIconSize;
             float previewSize=outer*.34f*(b.kind==rw05::Weapon?(float)g_weaponPreviewSizePercent/100.f:1.f);
             if(previewSize>181.f)previewSize=181.f;
             if(!hasItemPreview)add_art_icon(x,y,iconId,sector_weight(sector),outer);
             if(hasItemPreview){
                 visibleIconSize=previewSize;int q=sector*6;
+                itemArtSize=previewSize;
                 quad_tex(g_formPreviewQuads,q,x-previewSize*.5f,y-previewSize*.5f,
                     previewSize,previewSize,0xffffffffu,0.f,0.f,1.f,1.f);
                 g_formPreviewSectorCache[sector]=cacheSlot;
@@ -2718,6 +2827,17 @@ void draw_labels(float width,float height){
             mark_quad(x-32.f,y-31.f,64.f,61.f,tinted(0x9b142333u));
             mark_quad(x-32.f,y+27.f,64.f,3.f,tinted(accent));
             draw_category_icon(x,y-6.f,(rw05::Kind)b.kind,accent);
+        }
+        const Long available= g_inventoryQuantities[wheel][sector][index];
+        if(available>=0&&b.kind!=rw05::Weapon&&b.kind!=rw05::Armor&&b.kind!=rw05::Spell&&b.kind!=rw05::Shout){
+            char amount[12]{};unsigned value=(unsigned)available;int digits=0;char reversed[10]{};
+            do{reversed[digits++]=(char)('0'+value%10u);value/=10u;}while(value&&digits<9);
+            for(int d=0;d<digits;++d)amount[d]=reversed[digits-1-d];amount[digits]=0;
+            const float bx=x+itemArtSize*.23f,by=y+itemArtSize*.25f;
+            quantity_quad(bx-20.f,by-10.f,40.f,20.f,tinted(0xe8172029u));
+            quantity_quad(bx-20.f,by-10.f,40.f,1.5f,tinted(0xbca77a4cu));
+            if(g_fontAtlas)text_in(bx,by-10.f,20.f,36.f,10.f,amount,0xfffff4d9u);
+            else draw_text(bx-11.f,by-5.f,1.2f,amount,0xfffff4d9u);
         }
         // Count is not an additional artwork tile; always retain wheel stack semantics.
         if(slot.count>1){
@@ -2834,6 +2954,7 @@ void apply_presentation(float width,float height){
     // Selection sweep is now capable of drawing two arcs; the bounds match g_pips.
     for(int i=0;i<g_pipsUsed;++i)apply_to_vertex(g_pips[i],cx,cy,scale,opacity);
     for(int i=0;i<g_labelVert;++i)apply_to_vertex(g_labels[i],cx,cy,scale,opacity);
+    for(int i=0;i<g_quantityLabelVert;++i)apply_to_vertex(g_quantityLabels[i],cx,cy,scale,opacity);
     for(int i=0;i<g_artVertexCount;++i)apply_to_vertex(g_artQuads[i],cx,cy,scale,opacity);
     for(int sector=0;sector<8;++sector)if(g_formPreviewSectorCache[sector]>=0)
         for(int i=sector*6;i<sector*6+6;++i){apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);apply_to_vertex(g_formPreviewOutlineQuads[i],cx,cy,scale,opacity);}
@@ -2870,6 +2991,83 @@ void append_hex(char* buf,unsigned& n,DWord v){
     const char* digit="0123456789ABCDEF";
     buf[n++]='0';buf[n++]='x';
     for(int i=7;i>=0;--i)buf[n++]=digit[(v>>(i*4))&15u];
+}
+Raw create_preview_texture_from_pixels(Raw device,const unsigned char* pixels){
+    if(!device||!pixels)return nullptr;
+    Raw texture=nullptr;
+    if(!succeeded(reinterpret_cast<CreateTexture>(get(device,kCreateTexture))
+        (device,kFormPreviewSide,kFormPreviewSide,1,0,21,1,&texture,nullptr))||!texture)return nullptr;
+    LockedRectangle dst{};
+    if(!succeeded(reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&dst,nullptr,0))||
+       !dst.bits||dst.pitch<(Long)(kFormPreviewSide*4u)){
+        if(dst.bits)reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+        drop(texture);return nullptr;
+    }
+    for(unsigned y=0;y<kFormPreviewSide;++y){
+        unsigned char* dstRow=(unsigned char*)dst.bits+y*(UInit)dst.pitch;
+        const unsigned char* srcRow=pixels+y*kFormPreviewSide*4u;
+        for(unsigned x=0;x<kFormPreviewSide*4u;++x)dstRow[x]=srcRow[x];
+    }
+    reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+    return texture;
+}
+Raw create_preview_outline_texture(Raw device,const unsigned char* pixels){
+    if(!device||!pixels)return nullptr;
+    Raw texture=nullptr;
+    if(!succeeded(reinterpret_cast<CreateTexture>(get(device,kCreateTexture))
+        (device,kFormPreviewSide,kFormPreviewSide,1,0,21,1,&texture,nullptr))||!texture)return nullptr;
+    LockedRectangle dst{};
+    if(!succeeded(reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&dst,nullptr,0))||
+       !dst.bits||dst.pitch<(Long)(kFormPreviewSide*4u)){
+        if(dst.bits)reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+        drop(texture);return nullptr;
+    }
+    for(unsigned y=0;y<kFormPreviewSide;++y){
+        unsigned char* row=(unsigned char*)dst.bits+y*(UInit)dst.pitch;
+        for(unsigned x=0;x<kFormPreviewSide;++x){
+            const unsigned char own=pixels[(y*kFormPreviewSide+x)*4u+3u];unsigned char expanded=own;
+            for(int oy=-3;oy<=3;++oy)for(int ox=-3;ox<=3;++ox){
+                const int px=(int)x+ox,py=(int)y+oy;
+                if(px<0||py<0||px>=(int)kFormPreviewSide||py>=(int)kFormPreviewSide)continue;
+                const int distance=ox*ox+oy*oy;if(distance>10)continue;
+                const unsigned char neighbor=pixels[((unsigned)py*kFormPreviewSide+(unsigned)px)*4u+3u];
+                const unsigned char candidate=(unsigned char)((unsigned)neighbor*(distance<=2?220u:160u)/255u);
+                if(candidate>expanded)expanded=candidate;
+            }
+            unsigned char* d=row+x*4u;d[0]=d[1]=d[2]=255;d[3]=expanded>own?(unsigned char)(expanded-own):0;
+        }
+    }
+    reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+    return texture;
+}
+void restore_cached_form_previews(Raw device){
+    if(!device)return;
+    if(g_formPreviewDevice!=device){
+        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;
+            drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+        g_formPreviewDevice=device;
+    }
+    for(unsigned i=0;i<24;++i){
+        unsigned char pixels[kFormPreviewBytes];DWord form=0;
+        AcquireSRWLockShared(&g_previewDataLock);
+        form=g_formPreviewPixelForms[i];
+        const bool ready=form&&g_formPreviewForms[i]==form&&g_formPreviewTextures[i];
+        if(!ready&&form)for(unsigned b=0;b<kFormPreviewBytes;++b)pixels[b]=g_formPreviewPixels[i][b];
+        ReleaseSRWLockShared(&g_previewDataLock);
+        if(!form||ready)continue;
+        Raw base=create_preview_texture_from_pixels(device,pixels);
+        if(!base)continue;
+        Raw outline=create_preview_outline_texture(device,pixels);
+        Raw oldBase=nullptr,oldOutline=nullptr;
+        AcquireSRWLockExclusive(&g_previewDataLock);
+        if(g_formPreviewPixelForms[i]==form){
+            oldBase=g_formPreviewTextures[i];oldOutline=g_formPreviewOutlineTextures[i];
+            g_formPreviewTextures[i]=base;g_formPreviewOutlineTextures[i]=outline;g_formPreviewForms[i]=form;
+            base=nullptr;outline=nullptr;
+        }
+        ReleaseSRWLockExclusive(&g_previewDataLock);
+        drop(oldBase);drop(oldOutline);drop(base);drop(outline);
+    }
 }
 int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord format,DWord formId){
     constexpr unsigned side=128,inner=116;
@@ -2960,9 +3158,27 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord 
         g_formPreviewDevice=device;g_formPreviewNext=0;
     }
     int cacheSlot=-1;
-    for(unsigned i=0;i<24;++i)if(g_formPreviewForms[i]==formId){cacheSlot=(int)i;break;}
-    if(cacheSlot<0)for(unsigned i=0;i<24;++i)if(!g_formPreviewForms[i]){cacheSlot=(int)i;break;}
+    AcquireSRWLockShared(&g_previewDataLock);
+    for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==formId){cacheSlot=(int)i;break;}
+    if(cacheSlot<0)for(unsigned i=0;i<24;++i)if(!g_formPreviewPixelForms[i]){cacheSlot=(int)i;break;}
+    ReleaseSRWLockShared(&g_previewDataLock);
     if(cacheSlot<0)cacheSlot=(int)(g_formPreviewNext++%24u);
+    bool persistedPixels=false;
+    LockedRectangle copySrc{};
+    if(succeeded(reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&copySrc,nullptr,0))&&
+       copySrc.bits&&copySrc.pitch>=(Long)(side*4u)){
+        AcquireSRWLockExclusive(&g_previewDataLock);
+        for(unsigned y=0;y<side;++y){
+            const unsigned char* srcRow=(const unsigned char*)copySrc.bits+y*(UInit)copySrc.pitch;
+            unsigned char* dstRow=g_formPreviewPixels[cacheSlot]+y*side*4u;
+            for(unsigned x=0;x<side*4u;++x)dstRow[x]=srcRow[x];
+        }
+        g_formPreviewPixelForms[cacheSlot]=formId;
+        persistedPixels=true;
+        ReleaseSRWLockExclusive(&g_previewDataLock);
+        reinterpret_cast<TextureUnlock>(get(texture,kUnlockTexture))(texture,0);
+    }
+    if(!persistedPixels){AcquireSRWLockExclusive(&g_previewDataLock);g_formPreviewPixelForms[cacheSlot]=0;ReleaseSRWLockExclusive(&g_previewDataLock);}
     drop(g_formPreviewTextures[cacheSlot]);drop(g_formPreviewOutlineTextures[cacheSlot]);
     g_formPreviewTextures[cacheSlot]=texture;g_formPreviewOutlineTextures[cacheSlot]=outlineTexture;g_formPreviewForms[cacheSlot]=formId;
     return 1;
@@ -3095,10 +3311,20 @@ void clear_form_preview_cache(){
         g_formPreviewOutlineTextures[i]=nullptr;drop(texture);drop(outline);
     }
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
+    if(InterlockedExchange(&g_previewCacheClearPixels,0)){
+        AcquireSRWLockExclusive(&g_previewDataLock);
+        for(unsigned i=0;i<24;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
+        ReleaseSRWLockExclusive(&g_previewDataLock);
+    }
 }
 int preview_cache_reset_fault(){
     for(unsigned i=0;i<24;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
+    if(InterlockedExchange(&g_previewCacheClearPixels,0)){
+        AcquireSRWLockExclusive(&g_previewDataLock);
+        for(unsigned i=0;i<24;++i)g_formPreviewPixelForms[i]=0;
+        ReleaseSRWLockExclusive(&g_previewDataLock);
+    }
     file_log("RunicWheelLE: preview cache reset faulted; remaining thumbnails will be ignored\r\n");
     return 1;
 }
@@ -3360,6 +3586,7 @@ int draw(Raw device){
     // Fixed-function state, deterministic and restored below.
     overlay_state(device,vp.w,vp.h);
     (void)load_theme(device); // Fail-safe: missing assets retain V0.12.1 pixel symbols.
+    restore_cached_form_previews(device);
     AcquireSRWLockShared(&g_catalogLock);
     __try {
         update_visual_focus(g_presentationNow,rw02::clamp((int)g_activeWheel,0,g_pageCount-1),
@@ -3395,6 +3622,8 @@ int draw(Raw device){
         if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot])
             ok=draw_textured_pass(device,g_formPreviewTextures[cacheSlot],&g_formPreviewQuads[sector*6],2);
     }
+    if(ok&&g_quantityLabelVert>0)
+        ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_quantityLabelVert/3),g_quantityLabels,sizeof(Vertex)));
     if(ok && g_fontAtlas && g_fontVertexCount)ok=draw_textured_pass(device,g_fontAtlas,g_fontQuads,(UInit)(g_fontVertexCount/3));
     reset_texture_pass(device);
     if(ok)InterlockedExchange(&g_drawStep,0);
@@ -3456,6 +3685,13 @@ HResult W on_present(Raw device,const Rectangle* src,const Rectangle* dst,Handle
     guarded_preview_cache_reset(); // D3D resources are released on the render thread, not SKSE messaging thread.
     guarded_preview_probe(device); // copy the inventory frame before the wheel overlay
     guarded_frame(device);
+    const DWord refreshNow=GetTickCount();
+    const DWord refreshLast=(DWord)InterlockedCompareExchange(&g_lastInventoryRefreshTick,0,0);
+    const DWord refreshInterval=g_visible?750u:5000u;
+    if(!refreshLast||refreshNow-refreshLast>=refreshInterval){
+        InterlockedExchange(&g_lastInventoryRefreshTick,(Long)refreshNow);
+        InterlockedExchange(&g_refreshNeeded,1);
+    }
     schedule_type_refresh();
     schedule_time_reconcile();
     Present next=g_previous;
@@ -3509,6 +3745,7 @@ void messages_body(SKSEMessagingInterface::Message* msg){
     if(!msg)return;
     if(msg->type==SKSEMessagingInterface::kMessage_NewGame || msg->type==SKSEMessagingInterface::kMessage_PreLoadGame){
         InterlockedExchange(&g_previewCacheResetPending,1);
+        InterlockedExchange(&g_previewCacheClearPixels,1);
         InterlockedExchange(&g_previewCapturePending,0);
         InterlockedExchange(&g_previewCaptureForm,0);
         InterlockedExchange(&g_pendingReset,1);
