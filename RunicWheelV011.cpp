@@ -3779,6 +3779,15 @@ void messages(SKSEMessagingInterface::Message* msg){
 }
 #include "RunicKhaosMenu.inl"
 #include "LayoutDump.inl"
+void open_khaos_from_wheel(){
+    if(!g_khaosReady)return;
+    if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);return;}
+    khaos_begin_session();
+    g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
+    g_khaosMouseX=g_khaosMouseY=-1.f;g_khaosSeedPointer=1;
+    InterlockedExchange(&g_khaosOpen,1);InterlockedExchange(&g_visible,0);
+    InterlockedExchange(&g_exitArmed,0);InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
+}
 } // namespace
 
 // KHA-OS v0.5L API v2, optional host: plugin works normally without KHAOS.dll.
@@ -3808,7 +3817,6 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
     InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
     file_log("RunicWheelLE: KHAOS menu opened\r\n");
 }
-void open_khaos_from_wheel(){if(g_khaosReady)KHAOS_ToggleMenu();}
 KHAOS_ABI bool KHAOS_IsMenuOpen(){return g_khaosOpen!=0;}
 KHAOS_ABI void KHAOS_RenderFrame(void* hwnd,void* device,int width,int height){
     if(!g_khaosOpen || !g_khaosReady || !device || !hwnd || width<640 || height<480)return;
