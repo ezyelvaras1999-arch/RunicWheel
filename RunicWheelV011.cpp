@@ -3793,7 +3793,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
     if(!g_khaosReady)return;
     if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);file_log("RunicWheelLE: KHAOS menu closed\r\n");return;}
     khaos_begin_session();
-    g_khaosCursorMode=value("KhaosCursorMode",1,0,2);
+    g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
     g_khaosMouseX=g_khaosMouseY=-1.f;
     g_khaosSeedPointer=1; // seeded on the first frame, once the back-buffer size is known
     InterlockedExchange(&g_khaosOpen,1);

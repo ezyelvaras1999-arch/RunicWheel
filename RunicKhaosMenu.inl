@@ -127,6 +127,8 @@ static KhaosField g_khaosFields[]={
  {"ClickFeedbackMs","ACTION FEEDBACK TIME","Milliseconds that action confirmation remains visible.",4,250,2000,50,900,&g_cfg.feedbackDuration},
  // INPUT
  {"OpenMouseButton","OPEN MOUSE BUTTON","DirectInput: middle mouse = 2.",5,0,4,1,2,&g_cfg.openMouse},
+ {"PrimaryMouseButton","PRIMARY MOUSE BUTTON","Mouse button used for the primary wheel action.",5,0,4,1,0,&g_cfg.primaryMouse},
+ {"SecondaryMouseButton","SECONDARY MOUSE BUTTON","Mouse button used for the secondary wheel action.",5,0,4,1,1,&g_cfg.secondaryMouse},
  {"PreviousWheelMouseButton","PREVIOUS PAGE MOUSE","Mouse side button 3 is the default.",5,0,4,1,3,&g_cfg.prevMouse},
  {"NextWheelMouseButton","NEXT PAGE MOUSE","Mouse side button 4 is the default.",5,0,4,1,4,&g_cfg.nextMouse},
  {"OpenKeyboardScanCode","OPEN KEY SCANCODE","0 disables; physical DirectInput keyboard scan code.",5,0,255,1,0,&g_cfg.keyboardOpen},
@@ -148,6 +150,14 @@ static KhaosField g_khaosFields[]={
  {"EnableQuickSectorKeys","QUICK SECTOR KEYS","Optional physical number keys 1-8.",5,0,1,1,0,&g_quickSectorKeys},
  {"EnableGamepad","GAMEPAD ENABLED","Allow controller input on the radial wheel.",5,0,1,1,1,&g_cfg.gamepad},
  {"GamepadDeadzonePercent","GAMEPAD DEADZONE","Percent deadzone for stick aiming.",5,0,90,5,22,&g_gamepadDeadzonePercent},
+ {"GamepadOpenMask","PAD OPEN MASK","Raw SKSE button mask; 0 disables this binding.",5,0,65535,1,9,&g_cfg.padOpen},
+ {"GamepadPreviousMask","PAD PREVIOUS PAGE MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,0,&g_cfg.padPrev},
+ {"GamepadNextMask","PAD NEXT PAGE MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,10,&g_cfg.padNext},
+ {"GamepadRightStickMask","PAD SELECT STICK MASK","Raw SKSE stick mask used to aim the wheel.",5,0,65535,1,12,&g_cfg.padStick},
+ {"GamepadPreviousItemMask","PAD PREVIOUS ITEM MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,4,&g_cfg.padItemPrevious},
+ {"GamepadNextItemMask","PAD NEXT ITEM MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,8,&g_cfg.padItemNext},
+ {"GamepadPrimaryMask","PAD PRIMARY ACTION MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,512,&g_cfg.padPrimary},
+ {"GamepadSecondaryMask","PAD SECONDARY ACTION MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,256,&g_cfg.padSecondary},
  // ENGINE
  {"SlowTimePercent","TIME SPEED","World time percentage while the wheel is open.",6,1,100,5,10,&g_slowPercent},
  {"EnableNativeActions","NATIVE EQUIPMENT","Master gate for native equip/unequip/consumables.",6,0,1,1,1,&g_cfg.nativeActions},
@@ -439,7 +449,16 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
     if(!g_khaosOpen)return false;
     const KhaosDimensions d=khaos_dimensions(g_khaosWidth,g_khaosHeight);
     // Client-area mouse messages carry client coordinates (WM_MOUSEWHEEL does not).
-    if(msg>=0x0200u && msg<=0x0209u)khaos_point(lp,g_khaosMouseX,g_khaosMouseY);
+    if(msg>=0x0200u && msg<=0x0209u){
+        khaos_point(lp,g_khaosMouseX,g_khaosMouseY);
+        // Keep the plugin's modal pointer inside its panel even when the host
+        // does not capture/clip the Windows cursor to the modal window.
+        const float pad=3.f*d.scale;
+        if(g_khaosMouseX<d.x+pad)g_khaosMouseX=d.x+pad;
+        if(g_khaosMouseX>d.x+d.w-pad)g_khaosMouseX=d.x+d.w-pad;
+        if(g_khaosMouseY<d.y+pad)g_khaosMouseY=d.y+pad;
+        if(g_khaosMouseY>d.y+d.h-pad)g_khaosMouseY=d.y+d.h-pad;
+    }
     if(rw25::skyrim_tab(msg,(unsigned)wp)){
         InterlockedExchange(&g_khaosOpen,0);g_khaosDragging=0;
         file_log("RunicWheelLE: KHAOS released Skyrim TAB (window message)\r\n");
