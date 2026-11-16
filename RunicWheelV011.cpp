@@ -1891,6 +1891,7 @@ int layout_scancode(char c,int fallback){
     return sc&&sc<=255?(int)sc:fallback;
 }
 // Return true when an event must not reach vanilla gameplay.
+void open_khaos_from_wheel();
 int process_event(InputEvent* event){
     if(!event)return 0;
     // Foreground ownership is checked BEFORE modal configuration capture.
@@ -1904,15 +1905,17 @@ int process_event(InputEvent* event){
         return 0;
     }
     if(g_khaosOpen){
-        // Skyrim Tab opens TweenMenu. Never intercept it: dismiss configuration
-        // and forward the same key to vanilla. Escape closes configuration only.
+        // TAB toggles the KHA-OS modal while it is already open; consume it so
+        // the same press cannot open Skyrim's TweenMenu behind the modal.
         if(event->type==0 && event->device==0){
             const ButtonEvent* b=(const ButtonEvent*)event;
+            if(b->scan==15 && b->value!=0.0f){
+                InterlockedExchange(&g_khaosOpen,0);g_khaosDragging=0;
+                file_log("RunicWheelLE: KHAOS closed with TAB\r\n");return 1;
+            }
             if(rw25::close_on_directinput((unsigned)event->device,(unsigned)b->scan,b->value!=0.0f)){
                 InterlockedExchange(&g_khaosOpen,0);
-                file_log(b->scan==15 ? "RunicWheelLE: KHAOS released Skyrim TAB\r\n" :
-                                      "RunicWheelLE: KHAOS closed on ESC\r\n");
-                return b->scan==15 ? 0:1;
+                file_log("RunicWheelLE: KHAOS closed on ESC\r\n");return 1;
             }
         }
         return 1; // Modal config captures remaining gameplay actions only.
@@ -1924,6 +1927,10 @@ int process_event(InputEvent* event){
         const bool mouse=event->device==1;
         const bool key=event->device==0;
         const bool pad=event->device==2 && g_cfg.gamepad;
+        if(key&&down&&b->scan==(DWord)g_tweenMenuScanCode&&g_activation.visible&&!inventory_context()){
+            close_wheel();open_khaos_from_wheel();
+            file_log("RunicWheelLE: TAB replaced world wheel with KHA-OS settings\r\n");return 1;
+        }
         // Track physical modifiers even when the wheel opens while they are held.
         // Modifier keys themselves always pass through unchanged.
         if(key && g_modifiers.update((unsigned)b->scan,down))return 0;
@@ -3801,6 +3808,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
     InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
     file_log("RunicWheelLE: KHAOS menu opened\r\n");
 }
+void open_khaos_from_wheel(){if(g_khaosReady)KHAOS_ToggleMenu();}
 KHAOS_ABI bool KHAOS_IsMenuOpen(){return g_khaosOpen!=0;}
 KHAOS_ABI void KHAOS_RenderFrame(void* hwnd,void* device,int width,int height){
     if(!g_khaosOpen || !g_khaosReady || !device || !hwnd || width<640 || height<480)return;
