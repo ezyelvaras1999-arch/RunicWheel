@@ -2078,12 +2078,9 @@ void dispatch_input(void* dispatcher,InputEvent** head){
     queue_ui_sample();
     sync_time();
     if(!head||!g_previousInput){return;}
-    if(!g_cfg.suppress){
-        InputEvent* cur=*head;
-        for(int n=0;cur&&n<128;++n){if(!readable(cur,sizeof(ButtonEvent),0))break;process_event(cur);cur=cur->next;}
-        g_previousInput(dispatcher,head);queue_ui_sample();sync_time();return;
-    }
-    // Copy/relink, and always restore the original chains after downstream consumers.
+    // Filter only events claimed by this plugin even when general input
+    // suppression is disabled (e.g. contextual TAB -> KHA-OS toggle).
+    // Copy/relink and restore the original chain after downstream consumers.
     InputEvent* events[128];InputEvent* successors[128]; unsigned count=0;
     for(InputEvent* e=*head;e;e=e->next){
         if(count==128 || !readable(e,sizeof(ButtonEvent),0)){
