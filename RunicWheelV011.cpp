@@ -664,6 +664,8 @@ static int g_pageCount=3,g_sectorCount=8; // UI capacity, hidden entries kept in
 static int g_offsetX=0,g_offsetY=0,g_iconScalePercent=100,g_textScalePercent=100;
 static int g_weaponPreviewSizePercent=115;
 static int g_blockMenuHotkeys=1,g_inventoryMenuScanCode=23,g_tweenMenuScanCode=15,g_favoritesScanCode=16;
+static int g_settingsMenuScanCode=0;
+static volatile Long g_settingsKeyLatched=0;
 static int g_khaosFontOverride=0;
 static int g_visualAccentR=219,g_visualAccentG=186,g_visualAccentB=125;
 static int g_backgroundStrength=88,g_showDecorativeFrame=1;
@@ -1457,6 +1459,7 @@ void load_config(){
     g_inventoryMenuScanCode=value("InventoryMenuScanCode",23,0,255);
     g_tweenMenuScanCode=value("TweenMenuScanCode",15,0,255);
     g_favoritesScanCode=value("FavoritesScanCode",16,0,255);
+    g_settingsMenuScanCode=value("SettingsMenuScanCode",0,0,255);
     if(g_cfg.closeKey>=0x3C && g_cfg.closeKey<=0x3F){
         g_cfg.closeKey=1;
         file_log("RunicWheelLE: reserved function key CLOSE binding ignored (F2-F5)\r\n");
@@ -1909,7 +1912,10 @@ int process_event(InputEvent* event){
         // the same press cannot open Skyrim's TweenMenu behind the modal.
         if(event->type==0 && event->device==0){
             const ButtonEvent* b=(const ButtonEvent*)event;
-            if(b->scan==15 && b->value!=0.0f){
+            if(b->value==0.0f && (b->scan==15 || b->scan==(DWord)g_settingsMenuScanCode))
+                InterlockedExchange(&g_settingsKeyLatched,0);
+            if((b->scan==15 || (g_settingsMenuScanCode&&b->scan==(DWord)g_settingsMenuScanCode)) && b->value!=0.0f){
+                if(InterlockedCompareExchange(&g_settingsKeyLatched,1,0)!=0)return 1;
                 InterlockedExchange(&g_khaosOpen,0);
                 file_log("RunicWheelLE: KHAOS closed with TAB\r\n");return 1;
             }
@@ -1927,7 +1933,11 @@ int process_event(InputEvent* event){
         const bool mouse=event->device==1;
         const bool key=event->device==0;
         const bool pad=event->device==2 && g_cfg.gamepad;
-        if(key&&down&&b->scan==(DWord)g_tweenMenuScanCode&&g_activation.visible&&!inventory_context()){
+        const bool settingsKey=(b->scan==(DWord)g_tweenMenuScanCode ||
+            (g_settingsMenuScanCode&&b->scan==(DWord)g_settingsMenuScanCode));
+        if(key&&!down&&settingsKey)InterlockedExchange(&g_settingsKeyLatched,0);
+        if(key&&down&&settingsKey&&g_activation.visible&&!inventory_context()&&
+           InterlockedCompareExchange(&g_settingsKeyLatched,1,0)==0){
             close_wheel();open_khaos_from_wheel();
             file_log("RunicWheelLE: TAB replaced world wheel with KHA-OS settings\r\n");return 1;
         }

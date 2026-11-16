@@ -138,6 +138,7 @@ static KhaosField g_khaosFields[]={
  {"BlockMenuHotkeysWhileOpen","BLOCK WORLD MENUS","Block Inventory, Tab and Favorites while the wheel is open in the world.",5,0,1,1,1,&g_blockMenuHotkeys},
  {"InventoryMenuScanCode","INVENTORY KEY","Physical scan code; default I = 23. 0 disables.",5,0,255,1,23,&g_inventoryMenuScanCode},
  {"TweenMenuScanCode","TAB MENU KEY","Physical scan code; default Tab = 15. 0 disables.",5,0,255,1,15,&g_tweenMenuScanCode},
+ {"SettingsMenuScanCode","SETTINGS SHORTCUT KEY","Optional PC shortcut for settings while the world wheel is open; 0 disables.",5,0,255,1,0,&g_settingsMenuScanCode},
  {"FavoritesScanCode","FAVORITES KEY","Physical scan code; default Q = 16. 0 disables.",5,0,255,1,16,&g_favoritesScanCode},
  {"PreviousItemScanCode","PREVIOUS STACK KEY","Optional physical key. 0=disabled.",5,0,255,1,0,&g_itemPreviousKey},
  {"NextItemScanCode","NEXT STACK KEY","Optional physical key. 0=disabled.",5,0,255,1,0,&g_itemNextKey},
