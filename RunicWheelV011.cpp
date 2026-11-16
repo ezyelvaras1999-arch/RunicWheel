@@ -1910,7 +1910,7 @@ int process_event(InputEvent* event){
         if(event->type==0 && event->device==0){
             const ButtonEvent* b=(const ButtonEvent*)event;
             if(b->scan==15 && b->value!=0.0f){
-                InterlockedExchange(&g_khaosOpen,0);g_khaosDragging=0;
+                InterlockedExchange(&g_khaosOpen,0);
                 file_log("RunicWheelLE: KHAOS closed with TAB\r\n");return 1;
             }
             if(rw25::close_on_directinput((unsigned)event->device,(unsigned)b->scan,b->value!=0.0f)){
@@ -2839,7 +2839,7 @@ void draw_labels(float width,float height){
         if(available>=0&&b.kind!=rw05::Weapon&&b.kind!=rw05::Armor&&b.kind!=rw05::Spell&&b.kind!=rw05::Shout){
             char amount[12]{};unsigned value=(unsigned)available;int digits=0;char reversed[10]{};
             do{reversed[digits++]=(char)('0'+value%10u);value/=10u;}while(value&&digits<9);
-            for(int d=0;d<digits;++d)amount[d]=reversed[digits-1-d];amount[digits]=0;
+            for(int digit=0;digit<digits;++digit)amount[digit]=reversed[digits-1-digit];amount[digits]=0;
             const float bx=x+itemArtSize*.23f,by=y+itemArtSize*.25f;
             quantity_quad(bx-20.f,by-10.f,40.f,20.f,tinted(0xe8172029u));
             quantity_quad(bx-20.f,by-10.f,40.f,1.5f,tinted(0xbca77a4cu));
