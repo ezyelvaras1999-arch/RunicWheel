@@ -5,6 +5,8 @@
 static volatile Long g_khaosHosted=0,g_khaosReady=0;
 static int g_khaosTab=0,g_khaosScroll=0,g_khaosFocus=-1,g_khaosDirty=0;
 static int g_khaosTitleEdit=-1,g_khaosStatus=0;
+static int g_khaosCaptureField=-1;
+static DWord g_khaosCaptureStarted=0;
 static int g_khaosWidth=1280,g_khaosHeight=720;
 // Persistent move offset during a play session, plus explicit drag lifetime.
 static float g_khaosOffsetX=0.f,g_khaosOffsetY=0.f;
@@ -126,24 +128,24 @@ static KhaosField g_khaosFields[]={
  {"SectorTransitionMs","SECTOR CROSSFADE","Selection highlight animation duration.",4,0,250,10,125,&g_sectorDuration},
  {"ClickFeedbackMs","ACTION FEEDBACK TIME","Milliseconds that action confirmation remains visible.",4,250,2000,50,900,&g_cfg.feedbackDuration},
  // INPUT
- {"OpenMouseButton","OPEN MOUSE BUTTON","DirectInput: middle mouse = 2.",5,0,4,1,2,&g_cfg.openMouse},
- {"PrimaryMouseButton","PRIMARY MOUSE BUTTON","Mouse button used for the primary wheel action.",5,0,4,1,0,&g_cfg.primaryMouse},
- {"SecondaryMouseButton","SECONDARY MOUSE BUTTON","Mouse button used for the secondary wheel action.",5,0,4,1,1,&g_cfg.secondaryMouse},
- {"PreviousWheelMouseButton","PREVIOUS PAGE MOUSE","Mouse side button 3 is the default.",5,0,4,1,3,&g_cfg.prevMouse},
- {"NextWheelMouseButton","NEXT PAGE MOUSE","Mouse side button 4 is the default.",5,0,4,1,4,&g_cfg.nextMouse},
- {"OpenKeyboardScanCode","OPEN KEY SCANCODE","0 disables; physical DirectInput keyboard scan code.",5,0,255,1,0,&g_cfg.keyboardOpen},
- {"PreviousWheelScanCode","PREVIOUS PAGE KEY","Physical scan 16 = Q on QWERTY / A on AZERTY.",5,0,255,1,16,&g_cfg.previousKey},
- {"NextWheelScanCode","NEXT PAGE KEY","Physical scan 18 = E, independent of keyboard layout.",5,0,255,1,18,&g_cfg.nextKey},
- {"CloseKeyboardScanCode","CLOSE KEY SCANCODE","Physical scan 1 = Escape.",5,0,255,1,1,&g_cfg.closeKey},
+ {"OpenMouseButton","OPEN WHEEL MOUSE","Click CAPTURE, then press the mouse button. Click - to restore default.",5,0,4,1,2,&g_cfg.openMouse},
+ {"PrimaryMouseButton","PRIMARY ACTION MOUSE","Click CAPTURE, then press the mouse button. Click - to restore default.",5,0,4,1,0,&g_cfg.primaryMouse},
+ {"SecondaryMouseButton","SECONDARY ACTION MOUSE","Click CAPTURE, then press the mouse button. Click - to restore default.",5,0,4,1,1,&g_cfg.secondaryMouse},
+ {"PreviousWheelMouseButton","PREVIOUS PAGE MOUSE","Click CAPTURE, then press the mouse button. Click - to restore default.",5,0,4,1,3,&g_cfg.prevMouse},
+ {"NextWheelMouseButton","NEXT PAGE MOUSE","Click CAPTURE, then press the mouse button. Click - to restore default.",5,0,4,1,4,&g_cfg.nextMouse},
+ {"OpenKeyboardScanCode","OPEN WHEEL KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,0,&g_cfg.keyboardOpen},
+ {"PreviousWheelScanCode","PREVIOUS PAGE KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,16,&g_cfg.previousKey},
+ {"NextWheelScanCode","NEXT PAGE KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,18,&g_cfg.nextKey},
+ {"CloseKeyboardScanCode","CLOSE WHEEL KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,1,&g_cfg.closeKey},
  {"BlockMenuHotkeysWhileOpen","BLOCK WORLD MENUS","Block Inventory, Tab and Favorites while the wheel is open in the world.",5,0,1,1,1,&g_blockMenuHotkeys},
- {"InventoryMenuScanCode","INVENTORY KEY","Physical scan code; default I = 23. 0 disables.",5,0,255,1,23,&g_inventoryMenuScanCode},
- {"TweenMenuScanCode","TAB MENU KEY","Physical scan code; default Tab = 15. 0 disables.",5,0,255,1,15,&g_tweenMenuScanCode},
- {"SettingsMenuScanCode","SETTINGS SHORTCUT KEY","Optional PC shortcut for settings while the world wheel is open; 0 disables.",5,0,255,1,0,&g_settingsMenuScanCode},
- {"FavoritesScanCode","FAVORITES KEY","Physical scan code; default Q = 16. 0 disables.",5,0,255,1,16,&g_favoritesScanCode},
- {"PreviousItemScanCode","PREVIOUS STACK KEY","Optional physical key. 0=disabled.",5,0,255,1,0,&g_itemPreviousKey},
- {"NextItemScanCode","NEXT STACK KEY","Optional physical key. 0=disabled.",5,0,255,1,0,&g_itemNextKey},
- {"PreviousOccupiedSectorScanCode","PREVIOUS OCCUPIED KEY","Skip empty sectors. 0=disabled.",5,0,255,1,0,&g_skipPreviousKey},
- {"NextOccupiedSectorScanCode","NEXT OCCUPIED KEY","Skip empty sectors. 0=disabled.",5,0,255,1,0,&g_skipNextKey},
+ {"InventoryMenuScanCode","INVENTORY KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,23,&g_inventoryMenuScanCode},
+ {"TweenMenuScanCode","TAB MENU KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,15,&g_tweenMenuScanCode},
+ {"SettingsMenuScanCode","SETTINGS SHORTCUT KEY","Optional PC shortcut. Click CAPTURE and press a key; - clears it.",5,0,255,1,0,&g_settingsMenuScanCode},
+ {"FavoritesScanCode","FAVORITES KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,16,&g_favoritesScanCode},
+ {"PreviousItemScanCode","PREVIOUS STACK KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,0,&g_itemPreviousKey},
+ {"NextItemScanCode","NEXT STACK KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,0,&g_itemNextKey},
+ {"PreviousOccupiedSectorScanCode","PREVIOUS OCCUPIED KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,0,&g_skipPreviousKey},
+ {"NextOccupiedSectorScanCode","NEXT OCCUPIED KEY","Click CAPTURE, then press the key. Click - to clear.",5,0,255,1,0,&g_skipNextKey},
  {"KeyboardLayoutMode","KEYBOARD LAYOUT","2=physical AZERTY/QWERTY; 3=legacy translated Q/E.",5,0,3,1,2,&g_cfg.keyboardMode},
  {"LeftClickEquipsRightHand","LEFT CLICK: RIGHT HAND","Left/right in-game equip mapping.",5,0,1,1,1,&g_cfg.leftClickRightHand},
  {"HoldThresholdMs","HOLD THRESHOLD","Tap/hold delay for wheel activation.",5,80,1200,20,260,&g_cfg.holdMs},
@@ -151,14 +153,14 @@ static KhaosField g_khaosFields[]={
  {"EnableQuickSectorKeys","QUICK SECTOR KEYS","Optional physical number keys 1-8.",5,0,1,1,0,&g_quickSectorKeys},
  {"EnableGamepad","GAMEPAD ENABLED","Allow controller input on the radial wheel.",5,0,1,1,1,&g_cfg.gamepad},
  {"GamepadDeadzonePercent","GAMEPAD DEADZONE","Percent deadzone for stick aiming.",5,0,90,5,22,&g_gamepadDeadzonePercent},
- {"GamepadOpenMask","PAD OPEN MASK","Raw SKSE button mask; 0 disables this binding.",5,0,65535,1,9,&g_cfg.padOpen},
- {"GamepadPreviousMask","PAD PREVIOUS PAGE MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,0,&g_cfg.padPrev},
- {"GamepadNextMask","PAD NEXT PAGE MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,10,&g_cfg.padNext},
- {"GamepadRightStickMask","PAD SELECT STICK MASK","Raw SKSE stick mask used to aim the wheel.",5,0,65535,1,12,&g_cfg.padStick},
- {"GamepadPreviousItemMask","PAD PREVIOUS ITEM MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,4,&g_cfg.padItemPrevious},
- {"GamepadNextItemMask","PAD NEXT ITEM MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,8,&g_cfg.padItemNext},
- {"GamepadPrimaryMask","PAD PRIMARY ACTION MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,512,&g_cfg.padPrimary},
- {"GamepadSecondaryMask","PAD SECONDARY ACTION MASK","Raw SKSE button mask; 0 disables.",5,0,65535,1,256,&g_cfg.padSecondary},
+ {"GamepadOpenMask","PAD OPEN WHEEL","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,9,&g_cfg.padOpen},
+ {"GamepadPreviousMask","PAD PREVIOUS PAGE","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,0,&g_cfg.padPrev},
+ {"GamepadNextMask","PAD NEXT PAGE","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,10,&g_cfg.padNext},
+ {"GamepadRightStickMask","PAD AIM STICK","Click CAPTURE, then move the stick you want to aim with.",5,0,65535,1,12,&g_cfg.padStick},
+ {"GamepadPreviousItemMask","PAD PREVIOUS ITEM","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,4,&g_cfg.padItemPrevious},
+ {"GamepadNextItemMask","PAD NEXT ITEM","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,8,&g_cfg.padItemNext},
+ {"GamepadPrimaryMask","PAD PRIMARY ACTION","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,512,&g_cfg.padPrimary},
+ {"GamepadSecondaryMask","PAD SECONDARY ACTION","Click CAPTURE, then press a controller button. Click - to clear.",5,0,65535,1,256,&g_cfg.padSecondary},
  // ENGINE
  {"SlowTimePercent","TIME SPEED","World time percentage while the wheel is open.",6,1,100,5,10,&g_slowPercent},
  {"EnableNativeActions","NATIVE EQUIPMENT","Master gate for native equip/unequip/consumables.",6,0,1,1,1,&g_cfg.nativeActions},
@@ -173,6 +175,62 @@ static KhaosField g_khaosFields[]={
 };
 static constexpr int kKhaosFieldCount=(int)(sizeof(g_khaosFields)/sizeof(g_khaosFields[0]));
 static int g_khaosDraft[kKhaosFieldCount]{};
+void khaos_int_string(int n,char (&buffer)[24]);
+void khaos_copy_title(char (&dst)[24],const char* src);
+bool khaos_is_input_field(int id){
+    if(id<0||id>=kKhaosFieldCount||g_khaosFields[id].tab!=5)return false;
+    return g_khaosFields[id].max==255 || g_khaosFields[id].max==65535 || g_khaosFields[id].max==4;
+}
+bool khaos_is_mouse_binding(int id){
+    if(id<0||id>=kKhaosFieldCount||g_khaosFields[id].tab!=5||g_khaosFields[id].max!=4)return false;
+    const char* k=g_khaosFields[id].key;
+    return k[0]=='O'||k[0]=='P'||k[0]=='S'||k[0]=='N';
+}
+bool khaos_is_pad_binding(int id){return khaos_is_input_field(id)&&g_khaosFields[id].max==65535;}
+bool khaos_is_stick_binding(int id){
+    if(id<0||id>=kKhaosFieldCount)return false;
+    const char* a="GamepadRightStickMask";const char* b=g_khaosFields[id].key;
+    while(*a&&*a==*b){++a;++b;}return *a==0&&*b==0;
+}
+void khaos_capture_name(int id,char (&out)[24]){
+    if(!khaos_is_input_field(id)){khaos_int_string(g_khaosDraft[id],out);return;}
+    const int v=g_khaosDraft[id];
+    if(v==0&&!khaos_is_mouse_binding(id)){khaos_copy_title(out,"DISABLED");return;}
+    const char* name=nullptr;
+    if(khaos_is_mouse_binding(id)){
+        if(v<=4){out[0]='M';out[1]=(char)('1'+v);out[2]=0;return;}
+    }else if(khaos_is_pad_binding(id)){
+        switch((unsigned)v){case 1:name="DPAD UP";break;case 2:name="DPAD DOWN";break;
+        case 4:name="DPAD LEFT";break;case 8:name="DPAD RIGHT";break;case 9:name="LT";break;case 10:name="RT";break;case 12:name="R STICK";break;case 16:name="START";break;
+        case 32:name="BACK";break;case 64:name="L STICK";break;case 128:name="R STICK";break;
+        case 256:name="LB";break;case 512:name="RB";break;case 1024:name="LT";break;
+        case 2048:name="RT";break;case 4096:name="A";break;case 8192:name="B";break;
+        case 16384:name="X";break;case 32768:name="Y";break;}
+    }else{
+        switch(v){case 1:name="ESC";break;case 2:name="1";break;case 3:name="2";break;case 4:name="3";break;
+        case 5:name="4";break;case 6:name="5";break;case 7:name="6";break;case 8:name="7";break;
+        case 9:name="8";break;case 10:name="9";break;case 11:name="0";break;case 12:name="-";break;
+        case 13:name="=";break;case 14:name="BACKSPACE";break;case 15:name="TAB";break;case 16:name="Q / A";break;
+        case 17:name="W / Z";break;case 18:name="E";break;case 19:name="R";break;case 20:name="T";break;
+        case 21:name="Y";break;case 22:name="U";break;case 23:name="I";break;case 24:name="O";break;
+        case 25:name="P";break;case 28:name="ENTER";break;case 29:name="CTRL";break;case 30:name="A / Q";break;
+        case 31:name="S";break;case 32:name="D";break;case 33:name="F";break;case 34:name="G";break;
+        case 35:name="H";break;case 36:name="J";break;case 37:name="K";break;case 38:name="L";break;
+        case 26:name="[";break;case 27:name="]";break;case 39:name=";";break;case 40:name="'";break;
+        case 41:name="`";break;case 42:name="SHIFT";break;case 43:name="\\";break;case 44:name="Z / W";break;case 45:name="X";break;case 46:name="C";break;
+        case 47:name="V";break;case 48:name="B";break;case 49:name="N";break;case 50:name="M";break;
+        case 51:name=",";break;case 52:name=".";break;case 53:name="/";break;case 55:name="NUM *";break;
+        case 56:name="ALT";break;case 57:name="SPACE";break;case 59:name="F1";break;case 60:name="F2";break;
+        case 61:name="F3";break;case 62:name="F4";break;case 63:name="F5";break;case 64:name="F6";break;
+        case 65:name="F7";break;case 66:name="F8";break;case 67:name="F9";break;case 68:name="F10";break;
+        case 71:name="NUM 7";break;case 72:name="NUM 8";break;case 73:name="NUM 9";break;case 74:name="NUM -";break;
+        case 75:name="NUM 4";break;case 76:name="NUM 5";break;case 77:name="NUM 6";break;case 78:name="NUM +";break;
+        case 79:name="NUM 1";break;case 80:name="NUM 2";break;case 81:name="NUM 3";break;case 82:name="NUM 0";break;
+        case 83:name="NUM .";break;case 87:name="F11";break;case 88:name="F12";break;}
+    }
+    if(name){khaos_copy_title(out,name);return;}
+    khaos_copy_title(out,khaos_is_pad_binding(id)?"PAD BUTTON":"KEY OTHER");
+}
 static const DWord g_khaosPalettes[6]={0xffdbba7du,0xff7bbdd9u,0xffe18b62u,0xffb28cceu,0xff84b59eu,0xffbbc3ceu};
 static const char* const g_khaosPaletteNames[6]={"NORDIC","FROST","EMBER","ARCANE","FOREST","SILVER"};
 static const char* const g_khaosTabs[8]={"LAYOUT","APPEARANCE","LABELS","STACKS","ANIMATION","INPUT","GAMEPLAY","EDITOR"};
@@ -187,7 +245,7 @@ void khaos_copy_title(char (&dst)[24],const char* src){int n=0;while(src&&src[n]
 void khaos_begin_session(){
     for(int i=0;i<kKhaosFieldCount;++i){g_khaosDraft[i]=*g_khaosFields[i].target;}
     for(int w=0;w<3;++w)khaos_copy_title(g_khaosTitles[w],g_wheelTitles[w]);
-    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;
+    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosCaptureField=-1;g_khaosCaptureStarted=0;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;
 }
 void khaos_discard(){khaos_begin_session();g_khaosStatus=2;}
 void khaos_adjust(int field,int direction){
@@ -310,9 +368,44 @@ void khaos_centered(float cx,float boxY,float boxH,float width,float px,const ch
 void khaos_rect(float x,float y,float w,float h,DWord color){if(w>0 && h>0)mark_quad(x,y,w,h,color);}
 void khaos_line(float x,float y,float w,DWord color){khaos_rect(x,y,w,2.f,color);}
 void khaos_field_display(int id,char (&out)[24]){
+    if(khaos_is_input_field(id)){khaos_capture_name(id,out);return;}
     int value=g_khaosDraft[id];if(g_khaosFields[id].min==0 && g_khaosFields[id].max==1){
         khaos_copy_title(out,value?"ON":"OFF");return;}
+    const char* key=g_khaosFields[id].key;
+    if(key[0]=='K'&&key[1]=='e'&&key[2]=='y'&&key[3]=='b'&&key[4]=='o'&&key[5]=='a'&&key[6]=='r'&&key[7]=='d'){
+        khaos_copy_title(out,value==2?"PHYSICAL":value==3?"LEGACY":"DEFAULT");return;
+    }
     khaos_int_string(value,out);
+}
+void khaos_start_capture(int id){
+    if(!khaos_is_input_field(id))return;
+    g_khaosCaptureField=id;g_khaosCaptureStarted=GetTickCount();g_khaosFocus=id;g_khaosStatus=0;
+    g_khaosProfileAction=0;
+}
+int khaos_capture_input(InputEvent* event){
+    const int id=g_khaosCaptureField;
+    if(id<0)return 0;
+    if((DWord)(GetTickCount()-g_khaosCaptureStarted)<180u)return 1;
+    if(event&&event->device==2&&event->type==3&&khaos_is_stick_binding(id)){
+        const StickEvent* stick=(const StickEvent*)event;
+        if((stick->x*stick->x+stick->y*stick->y)>.16f && stick->mask){
+            g_khaosDraft[id]=(int)stick->mask;g_khaosCaptureField=-1;g_khaosDirty=1;g_khaosStatus=0;
+        }
+        return 1;
+    }
+    if(khaos_is_stick_binding(id))return 1;
+    if(!event||event->type!=0)return 1;
+    const ButtonEvent* button=(const ButtonEvent*)event;
+    if(button->value==0.f)return 1;
+    const bool mouse=khaos_is_mouse_binding(id);
+    const bool pad=khaos_is_pad_binding(id);
+    if((mouse&&event->device!=1)||(pad&&event->device!=2)||(!mouse&&!pad&&event->device!=0))return 1;
+    if(!mouse&&!pad&&button->scan==1)return 1; // ESC cancels through the modal window handler.
+    const unsigned maximum=mouse?4u:pad?65535u:255u;
+    if(button->scan>maximum)return 1;
+    g_khaosDraft[id]=(int)button->scan;g_khaosCaptureField=-1;
+    g_khaosDirty=1;g_khaosStatus=0;g_khaosProfileAction=0;
+    return 1;
 }
 
 struct KhaosDimensions {float x,y,w,h,scale,rowBase,rowStep,leftW,previewX;int rows;};
@@ -377,12 +470,14 @@ void khaos_draw_menu(int width,int height){
         khaos_centered(labelLeft+labelW*.5f,yy,d.rowStep-4.f*s,labelW,17.4f*s,
             g_khaosFields[idx].label,0xffecdfc9u);
         char number[24]{};khaos_field_display(idx,number);
-        const float bx=d.x+d.leftW-89.f*s;
+        const bool binding=khaos_is_input_field(idx);
+        const float bx=d.x+d.leftW-(binding?125.f:89.f)*s;
         khaos_rect(bx-84.f*s,yy+2.f*s,31.f*s,28.f*s,0xff344457u);
-        khaos_rect(bx+47.f*s,yy+2.f*s,31.f*s,28.f*s,0xff344457u);
+        khaos_rect(bx+47.f*s,yy+2.f*s,(binding?68.f:31.f)*s,28.f*s,0xff344457u);
         khaos_centered(bx-68.f*s,yy+2.f*s,28.f*s,23.f*s,21.f*s,"-",0xffe9c882u);
-        khaos_centered(bx+62.f*s,yy+2.f*s,28.f*s,23.f*s,21.f*s,"+",0xffe9c882u);
-        khaos_centered(bx,yy+2.f*s,28.f*s,84.f*s,21.f*s,number,0xfffcf3e7u);
+        khaos_centered(bx+(binding?81.f:62.f)*s,yy+2.f*s,28.f*s,(binding?61.f:23.f)*s,binding?14.f*s:21.f*s,
+            binding?"CAPTURE":"+",0xffe9c882u);
+        khaos_centered(bx,yy+2.f*s,28.f*s,(binding?78.f:84.f)*s,binding?16.f*s:21.f*s,number,0xfffcf3e7u);
     }
     // Narrow view still provides fully functional tab/row controls.
     const int focus=(g_khaosFocus>=0 && g_khaosFields[g_khaosFocus].tab==g_khaosTab)?g_khaosFocus:khaos_field_index(g_khaosTab,0);
@@ -435,7 +530,7 @@ void khaos_draw_menu(int width,int height){
     }
     const float by=d.y+d.h-68.f*s;
     khaos_line(d.x+18.f*s,by-7.f*s,d.w-36.f*s,0x9b9c825cu);
-    const char* status=g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":
+    const char* status=g_khaosCaptureField>=0?"PRESS KEY / MOUSE / PAD INPUT  |  ESC CANCEL":g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":g_khaosStatus==4?"CAPTURE CANCELLED":
         g_khaosStatus==3?"INVALID INPUT OR SAVE FAILED":g_khaosDirty?"UNSAVED CHANGES":"READY";
     khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
     const float applyX=d.x+d.w-151.f*s,applyY=by+12.f*s,applyW=136.f*s,applyH=34.f*s;
@@ -470,6 +565,10 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
     }
     if(msg==0x0100u){ // WM_KEYDOWN
         const int key=(int)wp;
+        if(g_khaosCaptureField>=0){
+            if(key==0x1b){g_khaosCaptureField=-1;g_khaosStatus=4;}
+            return true;
+        }
         if(key==0x1b){InterlockedExchange(&g_khaosOpen,0);g_khaosDragging=0;return true;}
         if(key==0x0d){file_log("RunicWheelLE: KHAOS Enter received; applying settings\r\n");khaos_apply();return true;}
         if(key==0x08 && g_khaosTitleEdit<0){khaos_discard();return true;}
@@ -574,9 +673,14 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
             const int id=khaos_field_index(g_khaosTab,row+g_khaosScroll);
             if(id>=0){
                 g_khaosFocus=id;
-                const float fieldControlX=d.x+d.leftW-89.f*d.scale;
-                if(x>=fieldControlX-97.f*d.scale && x<=fieldControlX-43.f*d.scale)khaos_adjust(id,-1);
-                else if(x>=fieldControlX+40.f*d.scale && x<=fieldControlX+89.f*d.scale)khaos_adjust(id,1);
+                const bool binding=khaos_is_input_field(id);
+                const float fieldControlX=d.x+d.leftW-(binding?125.f:89.f)*d.scale;
+                if(binding&&x>=fieldControlX+42.f*d.scale&&x<=fieldControlX+116.f*d.scale)khaos_start_capture(id);
+                else if(binding&&x>=fieldControlX-97.f*d.scale&&x<=fieldControlX-43.f*d.scale){
+                    g_khaosDraft[id]=khaos_is_mouse_binding(id)?g_khaosFields[id].initial:0;
+                    g_khaosDirty=1;g_khaosStatus=0;g_khaosProfileAction=0;
+                }else if(!binding&&x>=fieldControlX-97.f*d.scale && x<=fieldControlX-43.f*d.scale)khaos_adjust(id,-1);
+                else if(!binding&&x>=fieldControlX+40.f*d.scale && x<=fieldControlX+89.f*d.scale)khaos_adjust(id,1);
                 else if(g_khaosFields[id].max==1 && g_khaosFields[id].min==0)khaos_adjust(id,g_khaosDraft[id]? -1:1);
             }return true;
         }

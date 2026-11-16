@@ -1895,6 +1895,7 @@ int layout_scancode(char c,int fallback){
 }
 // Return true when an event must not reach vanilla gameplay.
 void open_khaos_from_wheel();
+int khaos_capture_input(InputEvent* event);
 int process_event(InputEvent* event){
     if(!event)return 0;
     // Foreground ownership is checked BEFORE modal configuration capture.
@@ -1908,6 +1909,7 @@ int process_event(InputEvent* event){
         return 0;
     }
     if(g_khaosOpen){
+        if(khaos_capture_input(event))return 1;
         // TAB toggles the KHA-OS modal while it is already open; consume it so
         // the same press cannot open Skyrim's TweenMenu behind the modal.
         if(event->type==0 && event->device==0){
@@ -2278,7 +2280,7 @@ static const Glyph kGlyphs[]={
  {'?',{14,17,1,2,4,0,4}},{' ',{0,0,0,0,0,0,0}}
 };
 static int g_labelVert=0;
-static Vertex g_quantityLabels[8*12];
+static Vertex g_quantityLabels[8*96];
 static int g_quantityLabelVert=0;
 void text_at(float midX,float capMid,float width,float fontPx,const char* raw,DWord col);
 void text_in(float midX,float boxY,float boxH,float width,float fontPx,const char* raw,DWord col,float fill=.62f);
@@ -2294,14 +2296,16 @@ void mark_quad(float x,float y,float width,float height,DWord col){
     Vertex& e=g_labels[g_labelVert++];vertex(e,x+width,y+height,col);
     Vertex& f=g_labels[g_labelVert++];vertex(f,x,y+height,col);
 }
-void quantity_quad(float x,float y,float width,float height,DWord col){
-    if(g_quantityLabelVert+6>(int)(sizeof(g_quantityLabels)/sizeof(g_quantityLabels[0])))return;
-    Vertex& a=g_quantityLabels[g_quantityLabelVert++];vertex(a,x,y,col);
-    Vertex& b=g_quantityLabels[g_quantityLabelVert++];vertex(b,x+width,y,col);
-    Vertex& c=g_quantityLabels[g_quantityLabelVert++];vertex(c,x+width,y+height,col);
-    Vertex& d=g_quantityLabels[g_quantityLabelVert++];vertex(d,x,y,col);
-    Vertex& e=g_quantityLabels[g_quantityLabelVert++];vertex(e,x+width,y+height,col);
-    Vertex& f=g_quantityLabels[g_quantityLabelVert++];vertex(f,x,y+height,col);
+void quantity_circle(float cx,float cy,float radius,DWord col){
+    static const float px[16]={1.f,.92388f,.70711f,.38268f,0.f,-.38268f,-.70711f,-.92388f,-1.f,-.92388f,-.70711f,-.38268f,0.f,.38268f,.70711f,.92388f};
+    static const float py[16]={0.f,.38268f,.70711f,.92388f,1.f,.92388f,.70711f,.38268f,0.f,-.38268f,-.70711f,-.92388f,-1.f,-.92388f,-.70711f,-.38268f};
+    if(g_quantityLabelVert+48>(int)(sizeof(g_quantityLabels)/sizeof(g_quantityLabels[0])))return;
+    for(int i=0;i<16;++i){
+        const int next=(i+1)&15;
+        Vertex& a=g_quantityLabels[g_quantityLabelVert++];vertex(a,cx,cy,col);
+        Vertex& b=g_quantityLabels[g_quantityLabelVert++];vertex(b,cx+px[i]*radius,cy+py[i]*radius,col);
+        Vertex& c=g_quantityLabels[g_quantityLabelVert++];vertex(c,cx+px[next]*radius,cy+py[next]*radius,col);
+    }
 }
 DWord item_class_color(rw05::Kind kind,unsigned iconId){
     if(kind==rw05::Weapon)return 0xffff8585u; // light red
@@ -2848,10 +2852,10 @@ void draw_labels(float width,float height){
             do{reversed[digits++]=(char)('0'+value%10u);value/=10u;}while(value&&digits<9);
             for(int digit=0;digit<digits;++digit)amount[digit]=reversed[digits-1-digit];amount[digits]=0;
             const float bx=x+itemArtSize*.23f,by=y+itemArtSize*.25f;
-            quantity_quad(bx-20.f,by-10.f,40.f,20.f,tinted(0xe8172029u));
-            quantity_quad(bx-20.f,by-10.f,40.f,1.5f,tinted(0xbca77a4cu));
-            if(g_fontAtlas)text_in(bx,by-10.f,20.f,36.f,10.f,amount,0xfffff4d9u);
-            else draw_text(bx-11.f,by-5.f,1.2f,amount,0xfffff4d9u);
+            quantity_circle(bx,by,23.f,tinted(0xbca77a4cu));
+            quantity_circle(bx,by,20.f,tinted(0xe8172029u));
+            if(g_fontAtlas)text_in(bx,by-13.f,26.f,40.f,15.f,amount,0xfffff4d9u);
+            else draw_text(bx-11.f,by-7.f,1.6f,amount,0xfffff4d9u);
         }
         // Count is not an additional artwork tile; always retain wheel stack semantics.
         if(slot.count>1){
