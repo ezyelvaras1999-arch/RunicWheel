@@ -181,6 +181,7 @@ static Raw g_atlasOwner=nullptr;
 static int g_iconAtlasChecked=0;
 static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
+static volatile Long g_previewCaptureStart=0, g_previewCaptureLockedForm=0; // v0.27
 static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
 static Raw g_formPreviewTextures[24]{};
 static Raw g_formPreviewOutlineTextures[24]{};
@@ -1685,6 +1686,22 @@ void advanced_action(unsigned gesture,bool primary){
        "RunicWheelLE: ADVANCED EDIT armed/cancelled/refused (no TESV mutation)\r\n");
 }
 
+// v0.27: the thumbnail used to be requested only for the item selected when the wheel OPENED, so any
+// other item added while the wheel stayed open kept its flat icon until the wheel was reopened with
+// that item selected. The item just added is the one the inventory is displaying, so request its
+// thumbnail now. The probe still waits until the displayed 3D model matches this FormID.
+void queue_added_preview_capture(DWord form){
+    if(!form||!g_inventoryPreviewCapture||!inventory_context())return;
+    for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==form)return;   // already have it
+    if(InterlockedCompareExchange(&g_previewClearActive,0,0))return;          // a capture is mid-flight
+    if(InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
+       (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0)==form)return; // already waiting for it
+    InterlockedExchange(&g_previewCaptureForm,(Long)form); // a newer add replaces a request still waiting for its model
+    InterlockedExchange(&g_previewCaptureAttempts,0);
+    InterlockedExchange(&g_previewCaptureStart,(Long)GetTickCount());
+    InterlockedExchange(&g_previewCapturePending,1);
+    file_log("RunicWheelLE: add queued in-memory 3D thumbnail for the added FormID\r\n");
+}
 void edit_click(bool remove){
     if(!inventory_context())return;
     // Never consume an old hovered item from another menu or expired frame.
@@ -1717,6 +1734,7 @@ void edit_click(bool remove){
         "RunicWheelLE: EDIT remove from selected slot\r\n":
         "RunicWheelLE: EDIT add hovered item to selected slot\r\n");}
     else file_log("RunicWheelLE: edit refused (no item, duplicate or sector full)\r\n");
+    if(changed&&!remove)queue_added_preview_capture(form);
 }
 
 static bool resolve_saved_form(unsigned saved,unsigned* out,void* context){
@@ -1852,6 +1870,7 @@ void queue_open_preview_capture(bool viaPad){
     }
     InterlockedExchange(&g_previewCaptureForm,(Long)form);
     InterlockedExchange(&g_previewCaptureAttempts,0);
+    InterlockedExchange(&g_previewCaptureStart,(Long)GetTickCount());
     InterlockedExchange(&g_previewCapturePending,1);
     file_log(viaPad?
         "RunicWheelLE: gamepad open queued in-memory 3D thumbnail for the selected-list FormID\r\n":
@@ -1959,7 +1978,7 @@ int process_event(InputEvent* event){
         // unchanged; no hidden edit toggle, undo or save interception.
         if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
         if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
-            activate(down,(mouse && b->scan==(DWord)g_cfg.openMouse) || pad,pad);return 1; // never trigger the game's middle-button action
+            activate(down,true,pad);return 1; // never trigger the game's middle-button action
         }
         // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
         // Some input paths report a nonzero timer or a zero analogue value;
@@ -3273,9 +3292,11 @@ void prepare_inventory_preview_capture(){
     if(!formId||!seen||GetTickCount()-seen>1500u)return;
     if(!g_previewBackupSurface||g_previewBackupDevice!=g_device)return;
     if(!inventory3d_model_matches(formId)){
-        if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
+        // Time based (it was 60 frames: about 1 s at 60 fps and shorter on faster machines). A model with
+        // large textures can take longer than that to load, especially the first time.
+        if((DWord)(GetTickCount()-(DWord)InterlockedCompareExchange(&g_previewCaptureStart,0,0))>=3000u){
             InterlockedExchange(&g_previewCapturePending,0);
-            file_log("RunicWheelLE: menu-render probe timed out waiting for hovered model\r\n");
+            log_item_refusal("preview model wait timed out (type unused)",formId,0);
         }
         return;
     }
@@ -3286,6 +3307,7 @@ void prepare_inventory_preview_capture(){
     if(succeeded(hr))hr=reinterpret_cast<ColorFill>(get(g_device,kColorFill))
         (g_device,back,nullptr,0xFFFF00FFu);
     if(succeeded(hr)){
+        InterlockedExchange(&g_previewCaptureLockedForm,(Long)formId);
         InterlockedExchange(&g_previewClearActive,1);
         file_log("RunicWheelLE: after Scaleform, frame saved and cleared; vanilla Inventory3DManager render follows\r\n");
     }else{
@@ -3322,7 +3344,7 @@ void finish_inventory_preview_capture(Raw device){
         // A save transition cancelled this request while the inventory model was rendering.
     }else if(captureReady&&InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
         cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
-        (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0))){
+        (DWord)InterlockedCompareExchange(&g_previewCaptureLockedForm,0,0))){
         InterlockedExchange(&g_previewCapturePending,0);
         file_log("RunicWheelLE: compact FormID thumbnail cached in memory; original screen restored and no image file written\r\n");
     }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){

@@ -1,5 +1,5 @@
 diff --git a/RunicKhaosMenu.inl b/RunicKhaosMenu.inl
-index 208507b..1a9cdf2 100644
+index 208507b..a8e95ae 100644
 --- a/RunicKhaosMenu.inl
 +++ b/RunicKhaosMenu.inl
 @@ -12,6 +12,14 @@ static int g_khaosWidth=1280,g_khaosHeight=720;
@@ -12,7 +12,7 @@ index 208507b..1a9cdf2 100644
 +// panel applies it, so the heavy actions (Apply writes the INI) never run inside the input dispatch.
 +static int g_khaosPadNav=1;
 +static volatile Long g_khaosPadKey=0;
-+static DWord g_khaosPadRepeatTick=0;
++static DWord g_khaosPadRepeatTick=0,g_khaosPadLastTick=0,g_khaosSavedTick=0;
 +constexpr int kKhaosPadActivate=0x1000; // pseudo key: A = start binding capture / toggle ON-OFF field
  static char g_khaosTitles[3][24]{};
  static int g_khaosThemeGeneration=-1;
@@ -26,7 +26,27 @@ index 208507b..1a9cdf2 100644
  }
  void khaos_discard(){khaos_begin_session();g_khaosStatus=2;}
  void khaos_adjust(int field,int direction){
-@@ -399,6 +407,7 @@ int khaos_capture_input(InputEvent* event){
+@@ -349,7 +357,7 @@ bool khaos_apply(){
+     if(g_activeWheel>=g_pageCount)InterlockedExchange(&g_activeWheel,0);
+     if(g_select>=g_sectorCount)InterlockedExchange(&g_select,0);
+     select_current();
+-    g_khaosDirty=0;g_khaosStatus=1;g_khaosProfileAction=0;
++    g_khaosDirty=0;g_khaosStatus=1;g_khaosProfileAction=0;g_khaosSavedTick=GetTickCount();
+     file_log("RunicWheelLE: KHAOS settings saved to canonical RunicWheelLE.ini\r\n");
+     return true;
+ }
+@@ -386,6 +394,10 @@ int khaos_capture_input(InputEvent* event){
+     const int id=g_khaosCaptureField;
+     if(id<0)return 0;
+     if((DWord)(GetTickCount()-g_khaosCaptureStarted)<180u)return 1;
++    if(g_khaosPadNav&&event&&event->device==2&&event->type==0){
++        const ButtonEvent* c=(const ButtonEvent*)event;
++        if(c->scan==0x20u&&c->value!=0.f&&c->duration==0.f){g_khaosCaptureField=-1;g_khaosStatus=4;return 1;} // Back cancels, like Esc
++    }
+     if(event&&event->device==2&&event->type==3&&khaos_is_stick_binding(id)){
+         const StickEvent* stick=(const StickEvent*)event;
+         if((stick->x*stick->x+stick->y*stick->y)>.16f && stick->mask){
+@@ -399,6 +411,7 @@ int khaos_capture_input(InputEvent* event){
      if(button->value==0.f)return 1;
      const bool mouse=khaos_is_mouse_binding(id);
      const bool pad=khaos_is_pad_binding(id);
@@ -34,7 +54,44 @@ index 208507b..1a9cdf2 100644
      if((mouse&&event->device!=1)||(pad&&event->device!=2)||(!mouse&&!pad&&event->device!=0))return 1;
      if(!mouse&&!pad&&button->scan==1)return 1; // ESC cancels through the modal window handler.
      const unsigned maximum=mouse?4u:pad?65535u:255u;
-@@ -691,8 +700,59 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
+@@ -530,14 +543,22 @@ void khaos_draw_menu(int width,int height){
+     }
+     const float by=d.y+d.h-68.f*s;
+     khaos_line(d.x+18.f*s,by-7.f*s,d.w-36.f*s,0x9b9c825cu);
+-    const char* status=g_khaosCaptureField>=0?"PRESS KEY / MOUSE / PAD INPUT  |  ESC CANCEL":g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":g_khaosStatus==4?"CAPTURE CANCELLED":
++    const char* status=g_khaosCaptureField>=0?(g_khaosPadNav?"PRESS KEY / MOUSE / PAD INPUT  |  ESC OR PAD BACK CANCEL":"PRESS KEY / MOUSE / PAD INPUT  |  ESC CANCEL"):g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":g_khaosStatus==4?"CAPTURE CANCELLED":
+         g_khaosStatus==3?"INVALID INPUT OR SAVE FAILED":g_khaosDirty?"UNSAVED CHANGES":"READY";
+-    khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
++    const bool savedFlash=g_khaosStatus==1&&g_khaosCaptureField<0&&g_khaosProfileAction==0&&
++        (DWord)(GetTickCount()-g_khaosSavedTick)<3000u;
++    if(savedFlash){ // solid strip left of the Apply button so the confirmation cannot be missed
++        const float fx=d.x+18.f*s,fw=(d.x+d.w-151.f*s)-8.f*s-fx;
++        khaos_rect(fx,by-4.f*s,fw,25.f*s,0xff1d6b3au);
++        khaos_centered(fx+fw*.5f,by-3.f*s,24.f*s,fw-12.f*s,19.f*s,status,0xffffffffu);
++    }else khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
+     const float applyX=d.x+d.w-151.f*s,applyY=by+12.f*s,applyW=136.f*s,applyH=34.f*s;
+     khaos_rect(applyX,applyY,applyW,applyH,0xffa9874du);
+     khaos_rect(applyX+2.f*s,applyY+2.f*s,applyW-4.f*s,applyH-4.f*s,0xff202a34u);
+     khaos_centered(applyX+applyW*.5f,applyY+2.f*s,applyH-4.f*s,applyW-8.f*s,14.f*s,"SAVE / APPLY",0xffffe1a0u);
++    const bool padHint=g_khaosPadNav&&g_khaosPadLastTick&&(DWord)(GetTickCount()-g_khaosPadLastTick)<10000u;
+     khaos_centered(d.x+(d.w-158.f*s)*.5f,by+16.f*s,24.f*s,d.w-166.f*s,12.f*s,
++        padHint?"D-PAD MOVE / CHANGE | LB RB TABS | A TOGGLE / BIND | START SAVE | BACK RESET | B CLOSE":
+         "ENTER APPLY | END RESET | F6-F11 PROFILES | ESC CLOSE",0xffe1e3dfu);
+ }
+ 
+@@ -587,8 +608,9 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
+         }
+         const int count=khaos_field_tab_count(g_khaosTab);
+         if(key==0x26 || key==0x28){
+-            int row=0;for(int i=0;i<count;++i)if(khaos_field_index(g_khaosTab,i)==g_khaosFocus){row=i;break;}
+-            row+=(key==0x26?-1:1);if(row<0)row=0;if(row>=count)row=count-1;
++            int row=0;bool found=false;for(int i=0;i<count;++i)if(khaos_field_index(g_khaosTab,i)==g_khaosFocus){row=i;found=true;break;}
++            if(found)row+=(key==0x26?-1:1); // nothing focused yet: the first press lands on the first row
++            if(row<0)row=0;if(row>=count)row=count-1;
+             g_khaosFocus=khaos_field_index(g_khaosTab,row);
+             if(row<g_khaosScroll)g_khaosScroll=row;
+             if(row>=g_khaosScroll+d.rows)g_khaosScroll=row-d.rows+1;
+@@ -691,8 +713,55 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
      return msg==0x0204u || msg==0x0205u || msg==0x0101u;
  }
  
@@ -62,6 +119,7 @@ index 208507b..1a9cdf2 100644
 +    const int key=khaos_pad_key(b->scan);
 +    if(!key)return;
 +    const DWord now=GetTickCount();
++    g_khaosPadLastTick=now;
 +    if(b->duration>0.f){
 +        const bool dpad=b->scan==1||b->scan==2||b->scan==4||b->scan==8;
 +        if(!dpad||b->duration<0.35f||(DWord)(now-g_khaosPadRepeatTick)<90u)return;
@@ -80,11 +138,6 @@ index 208507b..1a9cdf2 100644
 +        else if(g_khaosFields[f].min==0&&g_khaosFields[f].max==1)khaos_adjust(f,g_khaosDraft[f]?-1:1);
 +        return;
 +    }
-+    // With nothing focused yet, the first up/down press focuses the first row instead of skipping it.
-+    if(g_khaosFocus<0&&(key==0x26||key==0x28)){
-+        if(khaos_field_tab_count(g_khaosTab)>0)g_khaosFocus=khaos_field_index(g_khaosTab,0);
-+        return;
-+    }
 +    (void)khaos_ui_event(0x0100u,(uintptr_t)key,0); // WM_KEYDOWN: same code path as the keyboard
 +}
 +
@@ -95,7 +148,7 @@ index 208507b..1a9cdf2 100644
      Raw extraTargets[3]={nullptr,nullptr,nullptr};
      SurfaceDesc desc{};
 diff --git a/RunicWheelLE.ini b/RunicWheelLE.ini
-index e6a7506..88accfa 100644
+index e6a7506..5b506ff 100644
 --- a/RunicWheelLE.ini
 +++ b/RunicWheelLE.ini
 @@ -145,12 +145,23 @@ FavoritesScanCode=16
@@ -105,7 +158,7 @@ index e6a7506..88accfa 100644
 +; 1 = the KHA-OS settings panel can be driven with the gamepad, no mouse needed:
 +;   D-pad up/down = move between rows, D-pad left/right = change the value, LB/RB = previous/next tab,
 +;   A = toggle an ON/OFF row or start capturing a binding row (then press the new button),
-+;   Start = Save / Apply, Back = reset this tab, B = close.  0 = mouse/keyboard only.
++;   Start = Save / Apply, Back = reset this tab (or cancel a binding capture), B = close.  0 = mouse/keyboard only.
 +KhaosGamepadNavigation=1
  ConsumeInputWhileOpen=1
  PreviousWheelMouseButton=3
@@ -123,10 +176,49 @@ index e6a7506..88accfa 100644
  GamepadOpenMask=9
  GamepadPreviousMask=0
 diff --git a/RunicWheelV011.cpp b/RunicWheelV011.cpp
-index b6457a3..502a6a6 100644
+index b6457a3..b79d261 100644
 --- a/RunicWheelV011.cpp
 +++ b/RunicWheelV011.cpp
-@@ -1840,20 +1840,27 @@ void change_visible(bool visible){
+@@ -181,6 +181,7 @@ static Raw g_atlasOwner=nullptr;
+ static int g_iconAtlasChecked=0;
+ static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
+ static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
++static volatile Long g_previewCaptureStart=0, g_previewCaptureLockedForm=0; // v0.27
+ static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
+ static Raw g_formPreviewTextures[24]{};
+ static Raw g_formPreviewOutlineTextures[24]{};
+@@ -1685,6 +1686,22 @@ void advanced_action(unsigned gesture,bool primary){
+        "RunicWheelLE: ADVANCED EDIT armed/cancelled/refused (no TESV mutation)\r\n");
+ }
+ 
++// v0.27: the thumbnail used to be requested only for the item selected when the wheel OPENED, so any
++// other item added while the wheel stayed open kept its flat icon until the wheel was reopened with
++// that item selected. The item just added is the one the inventory is displaying, so request its
++// thumbnail now. The probe still waits until the displayed 3D model matches this FormID.
++void queue_added_preview_capture(DWord form){
++    if(!form||!g_inventoryPreviewCapture||!inventory_context())return;
++    for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==form)return;   // already have it
++    if(InterlockedCompareExchange(&g_previewClearActive,0,0))return;          // a capture is mid-flight
++    if(InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
++       (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0)==form)return; // already waiting for it
++    InterlockedExchange(&g_previewCaptureForm,(Long)form); // a newer add replaces a request still waiting for its model
++    InterlockedExchange(&g_previewCaptureAttempts,0);
++    InterlockedExchange(&g_previewCaptureStart,(Long)GetTickCount());
++    InterlockedExchange(&g_previewCapturePending,1);
++    file_log("RunicWheelLE: add queued in-memory 3D thumbnail for the added FormID\r\n");
++}
+ void edit_click(bool remove){
+     if(!inventory_context())return;
+     // Never consume an old hovered item from another menu or expired frame.
+@@ -1717,6 +1734,7 @@ void edit_click(bool remove){
+         "RunicWheelLE: EDIT remove from selected slot\r\n":
+         "RunicWheelLE: EDIT add hovered item to selected slot\r\n");}
+     else file_log("RunicWheelLE: edit refused (no item, duplicate or sector full)\r\n");
++    if(changed&&!remove)queue_added_preview_capture(form);
+ }
+ 
+ static bool resolve_saved_form(unsigned saved,unsigned* out,void* context){
+@@ -1840,20 +1858,28 @@ void change_visible(bool visible){
          file_log(visible?"RunicWheelLE: input -> wheel OPEN\r\n":"RunicWheelLE: input -> wheel CLOSED\r\n");
      }
  }
@@ -144,6 +236,7 @@ index b6457a3..502a6a6 100644
      }
      InterlockedExchange(&g_previewCaptureForm,(Long)form);
      InterlockedExchange(&g_previewCaptureAttempts,0);
++    InterlockedExchange(&g_previewCaptureStart,(Long)GetTickCount());
      InterlockedExchange(&g_previewCapturePending,1);
 -    file_log("RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
 -}
@@ -159,7 +252,7 @@ index b6457a3..502a6a6 100644
      bool was=g_activation.visible;
      bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
      if(!was && now){g_mouseX=g_mouseY=0;InterlockedExchange(&g_renderLogged,0);rw20::reset(g_scrollEdges);
-@@ -1862,7 +1869,7 @@ void activate(bool down,bool mouseOpenButton){
+@@ -1862,7 +1888,7 @@ void activate(bool down,bool mouseOpenButton){
      if(was!=now)change_visible(now);
      if(!was && now){
          InterlockedExchange(&g_refreshNeeded,1);
@@ -168,7 +261,7 @@ index b6457a3..502a6a6 100644
      }
  }
  void close_wheel(){
-@@ -1896,6 +1903,7 @@ int layout_scancode(char c,int fallback){
+@@ -1896,6 +1922,7 @@ int layout_scancode(char c,int fallback){
  // Return true when an event must not reach vanilla gameplay.
  void open_khaos_from_wheel();
  int khaos_capture_input(InputEvent* event);
@@ -176,7 +269,7 @@ index b6457a3..502a6a6 100644
  int process_event(InputEvent* event){
      if(!event)return 0;
      // Foreground ownership is checked BEFORE modal configuration capture.
-@@ -1910,6 +1918,7 @@ int process_event(InputEvent* event){
+@@ -1910,6 +1937,7 @@ int process_event(InputEvent* event){
      }
      if(g_khaosOpen){
          if(khaos_capture_input(event))return 1;
@@ -184,16 +277,47 @@ index b6457a3..502a6a6 100644
          // TAB toggles the KHA-OS modal while it is already open; consume it so
          // the same press cannot open Skyrim's TweenMenu behind the modal.
          if(event->type==0 && event->device==0){
-@@ -1950,7 +1959,7 @@ int process_event(InputEvent* event){
+@@ -1950,7 +1978,7 @@ int process_event(InputEvent* event){
          // unchanged; no hidden edit toggle, undo or save interception.
          if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
          if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
 -            activate(down,mouse && b->scan==(DWord)g_cfg.openMouse);return 1; // never trigger the game's middle-button action
-+            activate(down,(mouse && b->scan==(DWord)g_cfg.openMouse) || pad,pad);return 1; // never trigger the game's middle-button action
++            activate(down,true,pad);return 1; // never trigger the game's middle-button action
          }
          // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
          // Some input paths report a nonzero timer or a zero analogue value;
-@@ -3795,6 +3804,7 @@ void open_khaos_from_wheel(){
+@@ -3264,9 +3292,11 @@ void prepare_inventory_preview_capture(){
+     if(!formId||!seen||GetTickCount()-seen>1500u)return;
+     if(!g_previewBackupSurface||g_previewBackupDevice!=g_device)return;
+     if(!inventory3d_model_matches(formId)){
+-        if(InterlockedIncrement(&g_previewCaptureAttempts)>=60){
++        // Time based (it was 60 frames: about 1 s at 60 fps and shorter on faster machines). A model with
++        // large textures can take longer than that to load, especially the first time.
++        if((DWord)(GetTickCount()-(DWord)InterlockedCompareExchange(&g_previewCaptureStart,0,0))>=3000u){
+             InterlockedExchange(&g_previewCapturePending,0);
+-            file_log("RunicWheelLE: menu-render probe timed out waiting for hovered model\r\n");
++            log_item_refusal("preview model wait timed out (type unused)",formId,0);
+         }
+         return;
+     }
+@@ -3277,6 +3307,7 @@ void prepare_inventory_preview_capture(){
+     if(succeeded(hr))hr=reinterpret_cast<ColorFill>(get(g_device,kColorFill))
+         (g_device,back,nullptr,0xFFFF00FFu);
+     if(succeeded(hr)){
++        InterlockedExchange(&g_previewCaptureLockedForm,(Long)formId);
+         InterlockedExchange(&g_previewClearActive,1);
+         file_log("RunicWheelLE: after Scaleform, frame saved and cleared; vanilla Inventory3DManager render follows\r\n");
+     }else{
+@@ -3313,7 +3344,7 @@ void finish_inventory_preview_capture(Raw device){
+         // A save transition cancelled this request while the inventory model was rendering.
+     }else if(captureReady&&InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
+         cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
+-        (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0))){
++        (DWord)InterlockedCompareExchange(&g_previewCaptureLockedForm,0,0))){
+         InterlockedExchange(&g_previewCapturePending,0);
+         file_log("RunicWheelLE: compact FormID thumbnail cached in memory; original screen restored and no image file written\r\n");
+     }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){
+@@ -3795,6 +3826,7 @@ void open_khaos_from_wheel(){
      if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);return;}
      khaos_begin_session();
      g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
@@ -201,7 +325,7 @@ index b6457a3..502a6a6 100644
      g_khaosMouseX=g_khaosMouseY=-1.f;g_khaosSeedPointer=1;
      InterlockedExchange(&g_khaosOpen,1);InterlockedExchange(&g_visible,0);
      InterlockedExchange(&g_exitArmed,0);InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
-@@ -3821,6 +3831,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
+@@ -3821,6 +3853,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
      if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);file_log("RunicWheelLE: KHAOS menu closed\r\n");return;}
      khaos_begin_session();
      g_khaosCursorMode=value("KhaosCursorMode",2,0,2);

@@ -18,7 +18,7 @@ static int g_khaosDragging=0;
 // panel applies it, so the heavy actions (Apply writes the INI) never run inside the input dispatch.
 static int g_khaosPadNav=1;
 static volatile Long g_khaosPadKey=0;
-static DWord g_khaosPadRepeatTick=0;
+static DWord g_khaosPadRepeatTick=0,g_khaosPadLastTick=0,g_khaosSavedTick=0;
 constexpr int kKhaosPadActivate=0x1000; // pseudo key: A = start binding capture / toggle ON-OFF field
 static char g_khaosTitles[3][24]{};
 static int g_khaosThemeGeneration=-1;
@@ -357,7 +357,7 @@ bool khaos_apply(){
     if(g_activeWheel>=g_pageCount)InterlockedExchange(&g_activeWheel,0);
     if(g_select>=g_sectorCount)InterlockedExchange(&g_select,0);
     select_current();
-    g_khaosDirty=0;g_khaosStatus=1;g_khaosProfileAction=0;
+    g_khaosDirty=0;g_khaosStatus=1;g_khaosProfileAction=0;g_khaosSavedTick=GetTickCount();
     file_log("RunicWheelLE: KHAOS settings saved to canonical RunicWheelLE.ini\r\n");
     return true;
 }
@@ -394,6 +394,10 @@ int khaos_capture_input(InputEvent* event){
     const int id=g_khaosCaptureField;
     if(id<0)return 0;
     if((DWord)(GetTickCount()-g_khaosCaptureStarted)<180u)return 1;
+    if(g_khaosPadNav&&event&&event->device==2&&event->type==0){
+        const ButtonEvent* c=(const ButtonEvent*)event;
+        if(c->scan==0x20u&&c->value!=0.f&&c->duration==0.f){g_khaosCaptureField=-1;g_khaosStatus=4;return 1;} // Back cancels, like Esc
+    }
     if(event&&event->device==2&&event->type==3&&khaos_is_stick_binding(id)){
         const StickEvent* stick=(const StickEvent*)event;
         if((stick->x*stick->x+stick->y*stick->y)>.16f && stick->mask){
@@ -539,14 +543,22 @@ void khaos_draw_menu(int width,int height){
     }
     const float by=d.y+d.h-68.f*s;
     khaos_line(d.x+18.f*s,by-7.f*s,d.w-36.f*s,0x9b9c825cu);
-    const char* status=g_khaosCaptureField>=0?"PRESS KEY / MOUSE / PAD INPUT  |  ESC CANCEL":g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":g_khaosStatus==4?"CAPTURE CANCELLED":
+    const char* status=g_khaosCaptureField>=0?(g_khaosPadNav?"PRESS KEY / MOUSE / PAD INPUT  |  ESC OR PAD BACK CANCEL":"PRESS KEY / MOUSE / PAD INPUT  |  ESC CANCEL"):g_khaosProfileAction==1?"PROFILE SAVED TO INI":g_khaosProfileAction==2?"PROFILE LOADED: PRESS ENTER TO APPLY":g_khaosStatus==1?"SAVED TO RUNICWHEELLE.INI":g_khaosStatus==2?"CHANGES REVERTED":g_khaosStatus==4?"CAPTURE CANCELLED":
         g_khaosStatus==3?"INVALID INPUT OR SAVE FAILED":g_khaosDirty?"UNSAVED CHANGES":"READY";
-    khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
+    const bool savedFlash=g_khaosStatus==1&&g_khaosCaptureField<0&&g_khaosProfileAction==0&&
+        (DWord)(GetTickCount()-g_khaosSavedTick)<3000u;
+    if(savedFlash){ // solid strip left of the Apply button so the confirmation cannot be missed
+        const float fx=d.x+18.f*s,fw=(d.x+d.w-151.f*s)-8.f*s-fx;
+        khaos_rect(fx,by-4.f*s,fw,25.f*s,0xff1d6b3au);
+        khaos_centered(fx+fw*.5f,by-3.f*s,24.f*s,fw-12.f*s,19.f*s,status,0xffffffffu);
+    }else khaos_centered(d.x+d.w*.5f,by-3.f*s,24.f*s,d.w-20.f*s,17.f*s,status,g_khaosStatus==3?0xffff9c87u:gold);
     const float applyX=d.x+d.w-151.f*s,applyY=by+12.f*s,applyW=136.f*s,applyH=34.f*s;
     khaos_rect(applyX,applyY,applyW,applyH,0xffa9874du);
     khaos_rect(applyX+2.f*s,applyY+2.f*s,applyW-4.f*s,applyH-4.f*s,0xff202a34u);
     khaos_centered(applyX+applyW*.5f,applyY+2.f*s,applyH-4.f*s,applyW-8.f*s,14.f*s,"SAVE / APPLY",0xffffe1a0u);
+    const bool padHint=g_khaosPadNav&&g_khaosPadLastTick&&(DWord)(GetTickCount()-g_khaosPadLastTick)<10000u;
     khaos_centered(d.x+(d.w-158.f*s)*.5f,by+16.f*s,24.f*s,d.w-166.f*s,12.f*s,
+        padHint?"D-PAD MOVE / CHANGE | LB RB TABS | A TOGGLE / BIND | START SAVE | BACK RESET | B CLOSE":
         "ENTER APPLY | END RESET | F6-F11 PROFILES | ESC CLOSE",0xffe1e3dfu);
 }
 
@@ -596,8 +608,9 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
         }
         const int count=khaos_field_tab_count(g_khaosTab);
         if(key==0x26 || key==0x28){
-            int row=0;for(int i=0;i<count;++i)if(khaos_field_index(g_khaosTab,i)==g_khaosFocus){row=i;break;}
-            row+=(key==0x26?-1:1);if(row<0)row=0;if(row>=count)row=count-1;
+            int row=0;bool found=false;for(int i=0;i<count;++i)if(khaos_field_index(g_khaosTab,i)==g_khaosFocus){row=i;found=true;break;}
+            if(found)row+=(key==0x26?-1:1); // nothing focused yet: the first press lands on the first row
+            if(row<0)row=0;if(row>=count)row=count-1;
             g_khaosFocus=khaos_field_index(g_khaosTab,row);
             if(row<g_khaosScroll)g_khaosScroll=row;
             if(row>=g_khaosScroll+d.rows)g_khaosScroll=row-d.rows+1;
@@ -724,6 +737,7 @@ void khaos_pad_event(InputEvent* event){
     const int key=khaos_pad_key(b->scan);
     if(!key)return;
     const DWord now=GetTickCount();
+    g_khaosPadLastTick=now;
     if(b->duration>0.f){
         const bool dpad=b->scan==1||b->scan==2||b->scan==4||b->scan==8;
         if(!dpad||b->duration<0.35f||(DWord)(now-g_khaosPadRepeatTick)<90u)return;
@@ -740,11 +754,6 @@ void khaos_pad_dispatch(){
         if(f<0||f>=kKhaosFieldCount||g_khaosCaptureField>=0||g_khaosTitleEdit>=0)return;
         if(khaos_is_input_field(f))khaos_start_capture(f);          // then press the new button/stick
         else if(g_khaosFields[f].min==0&&g_khaosFields[f].max==1)khaos_adjust(f,g_khaosDraft[f]?-1:1);
-        return;
-    }
-    // With nothing focused yet, the first up/down press focuses the first row instead of skipping it.
-    if(g_khaosFocus<0&&(key==0x26||key==0x28)){
-        if(khaos_field_tab_count(g_khaosTab)>0)g_khaosFocus=khaos_field_index(g_khaosTab,0);
         return;
     }
     (void)khaos_ui_event(0x0100u,(uintptr_t)key,0); // WM_KEYDOWN: same code path as the keyboard
