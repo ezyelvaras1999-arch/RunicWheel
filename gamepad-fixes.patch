@@ -1,0 +1,211 @@
+diff --git a/RunicKhaosMenu.inl b/RunicKhaosMenu.inl
+index 208507b..1a9cdf2 100644
+--- a/RunicKhaosMenu.inl
++++ b/RunicKhaosMenu.inl
+@@ -12,6 +12,14 @@ static int g_khaosWidth=1280,g_khaosHeight=720;
+ static float g_khaosOffsetX=0.f,g_khaosOffsetY=0.f;
+ static float g_khaosGrabX=0.f,g_khaosGrabY=0.f;
+ static int g_khaosDragging=0;
++// v0.27 gamepad navigation of this panel. The panel already has complete keyboard navigation, so
++// gamepad buttons are translated into the same virtual keys: no Windows pointer is needed.
++// The input thread only queues one pending key (one interlocked word); the frame that draws the
++// panel applies it, so the heavy actions (Apply writes the INI) never run inside the input dispatch.
++static int g_khaosPadNav=1;
++static volatile Long g_khaosPadKey=0;
++static DWord g_khaosPadRepeatTick=0;
++constexpr int kKhaosPadActivate=0x1000; // pseudo key: A = start binding capture / toggle ON-OFF field
+ static char g_khaosTitles[3][24]{};
+ static int g_khaosThemeGeneration=-1;
+ static float g_khaosUIScale=1.f;
+@@ -245,7 +253,7 @@ void khaos_copy_title(char (&dst)[24],const char* src){int n=0;while(src&&src[n]
+ void khaos_begin_session(){
+     for(int i=0;i<kKhaosFieldCount;++i){g_khaosDraft[i]=*g_khaosFields[i].target;}
+     for(int w=0;w<3;++w)khaos_copy_title(g_khaosTitles[w],g_wheelTitles[w]);
+-    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosCaptureField=-1;g_khaosCaptureStarted=0;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;
++    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosCaptureField=-1;g_khaosCaptureStarted=0;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;InterlockedExchange(&g_khaosPadKey,0);
+ }
+ void khaos_discard(){khaos_begin_session();g_khaosStatus=2;}
+ void khaos_adjust(int field,int direction){
+@@ -399,6 +407,7 @@ int khaos_capture_input(InputEvent* event){
+     if(button->value==0.f)return 1;
+     const bool mouse=khaos_is_mouse_binding(id);
+     const bool pad=khaos_is_pad_binding(id);
++    if(pad&&event->device==2&&button->duration>0.f)return 1; // held (e.g. the A that started this capture), not a new press
+     if((mouse&&event->device!=1)||(pad&&event->device!=2)||(!mouse&&!pad&&event->device!=0))return 1;
+     if(!mouse&&!pad&&button->scan==1)return 1; // ESC cancels through the modal window handler.
+     const unsigned maximum=mouse?4u:pad?65535u:255u;
+@@ -691,8 +700,59 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
+     return msg==0x0204u || msg==0x0205u || msg==0x0101u;
+ }
+ 
++// ---- gamepad -> panel keys. SKSE LE gamepad masks (XInput bits): see RunicWheelLE.ini, [Controls].
++int khaos_pad_key(DWord mask){
++    switch(mask){
++        case 0x0001: return 0x26; // D-pad up    : focus previous row
++        case 0x0002: return 0x28; // D-pad down  : focus next row
++        case 0x0004: return 0x25; // D-pad left  : decrease value
++        case 0x0008: return 0x27; // D-pad right : increase value
++        case 0x0100: return 0x21; // LB          : previous tab (Page Up)
++        case 0x0200: return 0x22; // RB          : next tab (Page Down)
++        case 0x0010: return 0x0d; // Start       : Save / Apply (Enter)
++        case 0x0020: return 0x23; // Back        : reset this tab (End)
++        case 0x2000: return 0x1b; // B           : close (Esc)
++        case 0x1000: return kKhaosPadActivate; // A
++        default: return 0;
++    }
++}
++// Input dispatch thread. Releases are ignored; only the D-pad auto-repeats while held.
++void khaos_pad_event(InputEvent* event){
++    if(!g_khaosPadNav||!event||event->device!=2||event->type!=0)return;
++    const ButtonEvent* b=(const ButtonEvent*)event;
++    if(b->value==0.f)return;
++    const int key=khaos_pad_key(b->scan);
++    if(!key)return;
++    const DWord now=GetTickCount();
++    if(b->duration>0.f){
++        const bool dpad=b->scan==1||b->scan==2||b->scan==4||b->scan==8;
++        if(!dpad||b->duration<0.35f||(DWord)(now-g_khaosPadRepeatTick)<90u)return;
++    }
++    g_khaosPadRepeatTick=now;
++    InterlockedExchange(&g_khaosPadKey,(Long)key);
++}
++// Render thread, once per frame, before the panel is drawn.
++void khaos_pad_dispatch(){
++    const int key=(int)InterlockedExchange(&g_khaosPadKey,0);
++    if(!key||!g_khaosPadNav)return;
++    if(key==kKhaosPadActivate){
++        const int f=g_khaosFocus;
++        if(f<0||f>=kKhaosFieldCount||g_khaosCaptureField>=0||g_khaosTitleEdit>=0)return;
++        if(khaos_is_input_field(f))khaos_start_capture(f);          // then press the new button/stick
++        else if(g_khaosFields[f].min==0&&g_khaosFields[f].max==1)khaos_adjust(f,g_khaosDraft[f]?-1:1);
++        return;
++    }
++    // With nothing focused yet, the first up/down press focuses the first row instead of skipping it.
++    if(g_khaosFocus<0&&(key==0x26||key==0x28)){
++        if(khaos_field_tab_count(g_khaosTab)>0)g_khaosFocus=khaos_field_index(g_khaosTab,0);
++        return;
++    }
++    (void)khaos_ui_event(0x0100u,(uintptr_t)key,0); // WM_KEYDOWN: same code path as the keyboard
++}
++
+ int khaos_draw_frame(Raw device,int width,int height){
+     if(!device||width<640||height<480)return 0;
++    khaos_pad_dispatch();
+     Raw block=nullptr,back=nullptr,oldTarget=nullptr,oldDepth=nullptr;
+     Raw extraTargets[3]={nullptr,nullptr,nullptr};
+     SurfaceDesc desc{};
+diff --git a/RunicWheelLE.ini b/RunicWheelLE.ini
+index e6a7506..88accfa 100644
+--- a/RunicWheelLE.ini
++++ b/RunicWheelLE.ini
+@@ -145,12 +145,23 @@ FavoritesScanCode=16
+ ; KHA-OS panel pointer: 0=off, 1=draw one only while the Windows pointer is hidden
+ ; (some overlays hide it), 2=always draw one.
+ KhaosCursorMode=1
++; 1 = the KHA-OS settings panel can be driven with the gamepad, no mouse needed:
++;   D-pad up/down = move between rows, D-pad left/right = change the value, LB/RB = previous/next tab,
++;   A = toggle an ON/OFF row or start capturing a binding row (then press the new button),
++;   Start = Save / Apply, Back = reset this tab, B = close.  0 = mouse/keyboard only.
++KhaosGamepadNavigation=1
+ ConsumeInputWhileOpen=1
+ PreviousWheelMouseButton=3
+ NextWheelMouseButton=4
+ KeyboardLayoutMode=2
+ PreviousWheelScanCode=16
+ NextWheelScanCode=18
++; GAMEPAD BUTTON CODES (used by every Gamepad*Mask key below; the same values are what the KHA-OS
++; Controls tab records when you press a button there, so you never have to type them):
++;   DPad up=1  DPad down=2  DPad left=4  DPad right=8  Start=16  Back=32
++;   Left stick click=64  Right stick click=128  LB=256  RB=512  A=4096  B=8192  X=16384  Y=32768
++;   LT=9  RT=10   (triggers use these special SKSE codes, not XInput bits)
++;   Sticks (GamepadRightStickMask): left=11  right=12.   0 disables a binding.
+ EnableGamepad=1
+ GamepadOpenMask=9
+ GamepadPreviousMask=0
+diff --git a/RunicWheelV011.cpp b/RunicWheelV011.cpp
+index b6457a3..502a6a6 100644
+--- a/RunicWheelV011.cpp
++++ b/RunicWheelV011.cpp
+@@ -1840,20 +1840,27 @@ void change_visible(bool visible){
+         file_log(visible?"RunicWheelLE: input -> wheel OPEN\r\n":"RunicWheelLE: input -> wheel CLOSED\r\n");
+     }
+ }
+-void queue_open_preview_capture(){
++void queue_open_preview_capture(bool viaPad){
+     if(!g_inventoryPreviewCapture || !inventory_context())return;
+     const DWord form=(DWord)InterlockedCompareExchange(&g_uiHover,0,0);
+     const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
+     if(!form || !seen || GetTickCount()-seen>500u){
+-        file_log("RunicWheelLE: M3 opened in Inventory but no fresh hovered FormID; preview not queued\r\n");
++        file_log(viaPad?
++            "RunicWheelLE: wheel opened by gamepad in Inventory but no fresh selected-list FormID; preview not queued\r\n":
++            "RunicWheelLE: M3 opened in Inventory but no fresh hovered FormID; preview not queued\r\n");
+         return;
+     }
+     InterlockedExchange(&g_previewCaptureForm,(Long)form);
+     InterlockedExchange(&g_previewCaptureAttempts,0);
+     InterlockedExchange(&g_previewCapturePending,1);
+-    file_log("RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
+-}
+-void activate(bool down,bool mouseOpenButton){
++    file_log(viaPad?
++        "RunicWheelLE: gamepad open queued in-memory 3D thumbnail for the selected-list FormID\r\n":
++        "RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
++}
++// capturePreview: ask for the 3D thumbnail of the item the inventory is showing. That item comes from
++// the list selection (selectedEntry), which the mouse hover AND the gamepad/keyboard cursor both drive,
++// so it is valid for every input device; viaPad only selects the log wording.
++void activate(bool down,bool capturePreview,bool viaPad){
+     bool was=g_activation.visible;
+     bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
+     if(!was && now){g_mouseX=g_mouseY=0;InterlockedExchange(&g_renderLogged,0);rw20::reset(g_scrollEdges);
+@@ -1862,7 +1869,7 @@ void activate(bool down,bool mouseOpenButton){
+     if(was!=now)change_visible(now);
+     if(!was && now){
+         InterlockedExchange(&g_refreshNeeded,1);
+-        if(mouseOpenButton)queue_open_preview_capture();
++        if(capturePreview)queue_open_preview_capture(viaPad);
+     }
+ }
+ void close_wheel(){
+@@ -1896,6 +1903,7 @@ int layout_scancode(char c,int fallback){
+ // Return true when an event must not reach vanilla gameplay.
+ void open_khaos_from_wheel();
+ int khaos_capture_input(InputEvent* event);
++void khaos_pad_event(InputEvent* event);
+ int process_event(InputEvent* event){
+     if(!event)return 0;
+     // Foreground ownership is checked BEFORE modal configuration capture.
+@@ -1910,6 +1918,7 @@ int process_event(InputEvent* event){
+     }
+     if(g_khaosOpen){
+         if(khaos_capture_input(event))return 1;
++        khaos_pad_event(event); // gamepad navigation of the modal (queued, applied on the render thread)
+         // TAB toggles the KHA-OS modal while it is already open; consume it so
+         // the same press cannot open Skyrim's TweenMenu behind the modal.
+         if(event->type==0 && event->device==0){
+@@ -1950,7 +1959,7 @@ int process_event(InputEvent* event){
+         // unchanged; no hidden edit toggle, undo or save interception.
+         if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
+         if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
+-            activate(down,mouse && b->scan==(DWord)g_cfg.openMouse);return 1; // never trigger the game's middle-button action
++            activate(down,(mouse && b->scan==(DWord)g_cfg.openMouse) || pad,pad);return 1; // never trigger the game's middle-button action
+         }
+         // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
+         // Some input paths report a nonzero timer or a zero analogue value;
+@@ -3795,6 +3804,7 @@ void open_khaos_from_wheel(){
+     if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);return;}
+     khaos_begin_session();
+     g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
++    g_khaosPadNav=value("KhaosGamepadNavigation",1,0,1);
+     g_khaosMouseX=g_khaosMouseY=-1.f;g_khaosSeedPointer=1;
+     InterlockedExchange(&g_khaosOpen,1);InterlockedExchange(&g_visible,0);
+     InterlockedExchange(&g_exitArmed,0);InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
+@@ -3821,6 +3831,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
+     if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);file_log("RunicWheelLE: KHAOS menu closed\r\n");return;}
+     khaos_begin_session();
+     g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
++    g_khaosPadNav=value("KhaosGamepadNavigation",1,0,1);
+     g_khaosMouseX=g_khaosMouseY=-1.f;
+     g_khaosSeedPointer=1; // seeded on the first frame, once the back-buffer size is known
+     InterlockedExchange(&g_khaosOpen,1);

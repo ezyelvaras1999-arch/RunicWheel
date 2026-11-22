@@ -1840,20 +1840,27 @@ void change_visible(bool visible){
         file_log(visible?"RunicWheelLE: input -> wheel OPEN\r\n":"RunicWheelLE: input -> wheel CLOSED\r\n");
     }
 }
-void queue_open_preview_capture(){
+void queue_open_preview_capture(bool viaPad){
     if(!g_inventoryPreviewCapture || !inventory_context())return;
     const DWord form=(DWord)InterlockedCompareExchange(&g_uiHover,0,0);
     const DWord seen=(DWord)InterlockedCompareExchange(&g_uiSeen,0,0);
     if(!form || !seen || GetTickCount()-seen>500u){
-        file_log("RunicWheelLE: M3 opened in Inventory but no fresh hovered FormID; preview not queued\r\n");
+        file_log(viaPad?
+            "RunicWheelLE: wheel opened by gamepad in Inventory but no fresh selected-list FormID; preview not queued\r\n":
+            "RunicWheelLE: M3 opened in Inventory but no fresh hovered FormID; preview not queued\r\n");
         return;
     }
     InterlockedExchange(&g_previewCaptureForm,(Long)form);
     InterlockedExchange(&g_previewCaptureAttempts,0);
     InterlockedExchange(&g_previewCapturePending,1);
-    file_log("RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
+    file_log(viaPad?
+        "RunicWheelLE: gamepad open queued in-memory 3D thumbnail for the selected-list FormID\r\n":
+        "RunicWheelLE: M3 queued in-memory 3D thumbnail for hovered FormID\r\n");
 }
-void activate(bool down,bool mouseOpenButton){
+// capturePreview: ask for the 3D thumbnail of the item the inventory is showing. That item comes from
+// the list selection (selectedEntry), which the mouse hover AND the gamepad/keyboard cursor both drive,
+// so it is valid for every input device; viaPad only selects the log wording.
+void activate(bool down,bool capturePreview,bool viaPad){
     bool was=g_activation.visible;
     bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
     if(!was && now){g_mouseX=g_mouseY=0;InterlockedExchange(&g_renderLogged,0);rw20::reset(g_scrollEdges);
@@ -1862,7 +1869,7 @@ void activate(bool down,bool mouseOpenButton){
     if(was!=now)change_visible(now);
     if(!was && now){
         InterlockedExchange(&g_refreshNeeded,1);
-        if(mouseOpenButton)queue_open_preview_capture();
+        if(capturePreview)queue_open_preview_capture(viaPad);
     }
 }
 void close_wheel(){
@@ -1896,6 +1903,7 @@ int layout_scancode(char c,int fallback){
 // Return true when an event must not reach vanilla gameplay.
 void open_khaos_from_wheel();
 int khaos_capture_input(InputEvent* event);
+void khaos_pad_event(InputEvent* event);
 int process_event(InputEvent* event){
     if(!event)return 0;
     // Foreground ownership is checked BEFORE modal configuration capture.
@@ -1910,6 +1918,7 @@ int process_event(InputEvent* event){
     }
     if(g_khaosOpen){
         if(khaos_capture_input(event))return 1;
+        khaos_pad_event(event); // gamepad navigation of the modal (queued, applied on the render thread)
         // TAB toggles the KHA-OS modal while it is already open; consume it so
         // the same press cannot open Skyrim's TweenMenu behind the modal.
         if(event->type==0 && event->device==0){
@@ -1950,7 +1959,7 @@ int process_event(InputEvent* event){
         // unchanged; no hidden edit toggle, undo or save interception.
         if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
         if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
-            activate(down,mouse && b->scan==(DWord)g_cfg.openMouse);return 1; // never trigger the game's middle-button action
+            activate(down,(mouse && b->scan==(DWord)g_cfg.openMouse) || pad,pad);return 1; // never trigger the game's middle-button action
         }
         // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
         // Some input paths report a nonzero timer or a zero analogue value;
@@ -3795,6 +3804,7 @@ void open_khaos_from_wheel(){
     if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);return;}
     khaos_begin_session();
     g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
+    g_khaosPadNav=value("KhaosGamepadNavigation",1,0,1);
     g_khaosMouseX=g_khaosMouseY=-1.f;g_khaosSeedPointer=1;
     InterlockedExchange(&g_khaosOpen,1);InterlockedExchange(&g_visible,0);
     InterlockedExchange(&g_exitArmed,0);InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
@@ -3821,6 +3831,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
     if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);file_log("RunicWheelLE: KHAOS menu closed\r\n");return;}
     khaos_begin_session();
     g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
+    g_khaosPadNav=value("KhaosGamepadNavigation",1,0,1);
     g_khaosMouseX=g_khaosMouseY=-1.f;
     g_khaosSeedPointer=1; // seeded on the first frame, once the back-buffer size is known
     InterlockedExchange(&g_khaosOpen,1);

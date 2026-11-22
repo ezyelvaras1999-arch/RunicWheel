@@ -12,6 +12,14 @@ static int g_khaosWidth=1280,g_khaosHeight=720;
 static float g_khaosOffsetX=0.f,g_khaosOffsetY=0.f;
 static float g_khaosGrabX=0.f,g_khaosGrabY=0.f;
 static int g_khaosDragging=0;
+// v0.27 gamepad navigation of this panel. The panel already has complete keyboard navigation, so
+// gamepad buttons are translated into the same virtual keys: no Windows pointer is needed.
+// The input thread only queues one pending key (one interlocked word); the frame that draws the
+// panel applies it, so the heavy actions (Apply writes the INI) never run inside the input dispatch.
+static int g_khaosPadNav=1;
+static volatile Long g_khaosPadKey=0;
+static DWord g_khaosPadRepeatTick=0;
+constexpr int kKhaosPadActivate=0x1000; // pseudo key: A = start binding capture / toggle ON-OFF field
 static char g_khaosTitles[3][24]{};
 static int g_khaosThemeGeneration=-1;
 static float g_khaosUIScale=1.f;
@@ -245,7 +253,7 @@ void khaos_copy_title(char (&dst)[24],const char* src){int n=0;while(src&&src[n]
 void khaos_begin_session(){
     for(int i=0;i<kKhaosFieldCount;++i){g_khaosDraft[i]=*g_khaosFields[i].target;}
     for(int w=0;w<3;++w)khaos_copy_title(g_khaosTitles[w],g_wheelTitles[w]);
-    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosCaptureField=-1;g_khaosCaptureStarted=0;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;
+    g_khaosDragging=0;g_khaosScroll=0;g_khaosFocus=-1;g_khaosTitleEdit=-1;g_khaosCaptureField=-1;g_khaosCaptureStarted=0;g_khaosDirty=0;g_khaosStatus=0;g_khaosProfileNotice=0;g_khaosProfileAction=0;InterlockedExchange(&g_khaosPadKey,0);
 }
 void khaos_discard(){khaos_begin_session();g_khaosStatus=2;}
 void khaos_adjust(int field,int direction){
@@ -399,6 +407,7 @@ int khaos_capture_input(InputEvent* event){
     if(button->value==0.f)return 1;
     const bool mouse=khaos_is_mouse_binding(id);
     const bool pad=khaos_is_pad_binding(id);
+    if(pad&&event->device==2&&button->duration>0.f)return 1; // held (e.g. the A that started this capture), not a new press
     if((mouse&&event->device!=1)||(pad&&event->device!=2)||(!mouse&&!pad&&event->device!=0))return 1;
     if(!mouse&&!pad&&button->scan==1)return 1; // ESC cancels through the modal window handler.
     const unsigned maximum=mouse?4u:pad?65535u:255u;
@@ -691,8 +700,59 @@ bool khaos_ui_event(unsigned msg,uintptr_t wp,intptr_t lp){
     return msg==0x0204u || msg==0x0205u || msg==0x0101u;
 }
 
+// ---- gamepad -> panel keys. SKSE LE gamepad masks (XInput bits): see RunicWheelLE.ini, [Controls].
+int khaos_pad_key(DWord mask){
+    switch(mask){
+        case 0x0001: return 0x26; // D-pad up    : focus previous row
+        case 0x0002: return 0x28; // D-pad down  : focus next row
+        case 0x0004: return 0x25; // D-pad left  : decrease value
+        case 0x0008: return 0x27; // D-pad right : increase value
+        case 0x0100: return 0x21; // LB          : previous tab (Page Up)
+        case 0x0200: return 0x22; // RB          : next tab (Page Down)
+        case 0x0010: return 0x0d; // Start       : Save / Apply (Enter)
+        case 0x0020: return 0x23; // Back        : reset this tab (End)
+        case 0x2000: return 0x1b; // B           : close (Esc)
+        case 0x1000: return kKhaosPadActivate; // A
+        default: return 0;
+    }
+}
+// Input dispatch thread. Releases are ignored; only the D-pad auto-repeats while held.
+void khaos_pad_event(InputEvent* event){
+    if(!g_khaosPadNav||!event||event->device!=2||event->type!=0)return;
+    const ButtonEvent* b=(const ButtonEvent*)event;
+    if(b->value==0.f)return;
+    const int key=khaos_pad_key(b->scan);
+    if(!key)return;
+    const DWord now=GetTickCount();
+    if(b->duration>0.f){
+        const bool dpad=b->scan==1||b->scan==2||b->scan==4||b->scan==8;
+        if(!dpad||b->duration<0.35f||(DWord)(now-g_khaosPadRepeatTick)<90u)return;
+    }
+    g_khaosPadRepeatTick=now;
+    InterlockedExchange(&g_khaosPadKey,(Long)key);
+}
+// Render thread, once per frame, before the panel is drawn.
+void khaos_pad_dispatch(){
+    const int key=(int)InterlockedExchange(&g_khaosPadKey,0);
+    if(!key||!g_khaosPadNav)return;
+    if(key==kKhaosPadActivate){
+        const int f=g_khaosFocus;
+        if(f<0||f>=kKhaosFieldCount||g_khaosCaptureField>=0||g_khaosTitleEdit>=0)return;
+        if(khaos_is_input_field(f))khaos_start_capture(f);          // then press the new button/stick
+        else if(g_khaosFields[f].min==0&&g_khaosFields[f].max==1)khaos_adjust(f,g_khaosDraft[f]?-1:1);
+        return;
+    }
+    // With nothing focused yet, the first up/down press focuses the first row instead of skipping it.
+    if(g_khaosFocus<0&&(key==0x26||key==0x28)){
+        if(khaos_field_tab_count(g_khaosTab)>0)g_khaosFocus=khaos_field_index(g_khaosTab,0);
+        return;
+    }
+    (void)khaos_ui_event(0x0100u,(uintptr_t)key,0); // WM_KEYDOWN: same code path as the keyboard
+}
+
 int khaos_draw_frame(Raw device,int width,int height){
     if(!device||width<640||height<480)return 0;
+    khaos_pad_dispatch();
     Raw block=nullptr,back=nullptr,oldTarget=nullptr,oldDepth=nullptr;
     Raw extraTargets[3]={nullptr,nullptr,nullptr};
     SurfaceDesc desc{};
