@@ -183,14 +183,18 @@ static volatile Long g_inventoryPreviewCapture=0, g_previewCapturePending=0;
 static volatile Long g_previewCaptureForm=0, g_previewCaptureAttempts=0;
 static volatile Long g_previewCaptureStart=0, g_previewCaptureLockedForm=0; // v0.27
 static Raw g_previewBackupSurface=nullptr, g_previewBackupDevice=nullptr;
-static Raw g_formPreviewTextures[24]{};
-static Raw g_formPreviewOutlineTextures[24]{};
-static DWord g_formPreviewForms[24]{};
+// v0.27: was 24. A full wheel is 3 pages x 8 sectors x up to 4 stacked items = 96 bindings, and removed
+// items leave their thumbnail behind, so 24 entries were evicted (round robin) while still in use and
+// those slots fell back to the flat icon. 96 covers every possible binding.
+static constexpr unsigned kFormPreviewCache=96u;
+static Raw g_formPreviewTextures[kFormPreviewCache]{};
+static Raw g_formPreviewOutlineTextures[kFormPreviewCache]{};
+static DWord g_formPreviewForms[kFormPreviewCache]{};
 static constexpr unsigned kFormPreviewSide=128u;
 static constexpr unsigned kFormPreviewBytes=kFormPreviewSide*kFormPreviewSide*4u;
 static NativeSRWLock g_previewDataLock{};
-static unsigned char g_formPreviewPixels[24][kFormPreviewBytes]{};
-static DWord g_formPreviewPixelForms[24]{};
+static unsigned char g_formPreviewPixels[kFormPreviewCache][kFormPreviewBytes]{};
+static DWord g_formPreviewPixelForms[kFormPreviewCache]{};
 static Raw g_formPreviewDevice=nullptr;
 static unsigned g_formPreviewNext=0;
 static volatile Long g_previewClearActive=0, g_inventoryRenderBridgeHooked=0;
@@ -1692,7 +1696,7 @@ void advanced_action(unsigned gesture,bool primary){
 // thumbnail now. The probe still waits until the displayed 3D model matches this FormID.
 void queue_added_preview_capture(DWord form){
     if(!form||!g_inventoryPreviewCapture||!inventory_context())return;
-    for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==form)return;   // already have it
+    for(unsigned i=0;i<kFormPreviewCache;++i)if(g_formPreviewPixelForms[i]==form)return;   // already have it
     if(InterlockedCompareExchange(&g_previewClearActive,0,0))return;          // a capture is mid-flight
     if(InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
        (DWord)InterlockedCompareExchange(&g_previewCaptureForm,0,0)==form)return; // already waiting for it
@@ -1757,7 +1761,7 @@ void save_impl(SKSESerializationInterface* serial){
         file_log("RunicWheelLE: SKSE co-save write FAILED\r\n");
     else file_log("RunicWheelLE: SKSE co-save record WRITTEN\r\n");
     unsigned char previewRecord[8+kFormPreviewBytes];
-    for(unsigned cache=0;cache<24;++cache){
+    for(unsigned cache=0;cache<kFormPreviewCache;++cache){
         DWord cachedForm=0;AcquireSRWLockShared(&g_previewDataLock);
         cachedForm=g_formPreviewPixelForms[cache];
         if(cachedForm){
@@ -1778,7 +1782,7 @@ void save_impl(SKSESerializationInterface* serial){
 void load_impl(SKSESerializationInterface* serial){
     if(!serial||!serial->GetNextRecordInfo||!serial->ReadRecordData)return;
     AcquireSRWLockExclusive(&g_previewDataLock);
-    for(unsigned i=0;i<24;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
+    for(unsigned i=0;i<kFormPreviewCache;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
     ReleaseSRWLockExclusive(&g_previewDataLock);
     InterlockedExchange(&g_previewCacheClearPixels,0);InterlockedExchange(&g_previewCacheResetPending,1);
     UInt32 record=0,version=0,length=0;
@@ -1790,10 +1794,10 @@ void load_impl(SKSESerializationInterface* serial){
             const DWord saved=rw04::get32(previewRecord),bytes=rw04::get32(previewRecord+4);
             unsigned mapped=0;if(!saved||bytes!=kFormPreviewBytes||!resolve_saved_form(saved,&mapped,serial)||!mapped)continue;
             AcquireSRWLockExclusive(&g_previewDataLock);
-            unsigned target=24;
-            for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==mapped){target=i;break;}
-            if(target==24)for(unsigned i=0;i<24;++i)if(!g_formPreviewPixelForms[i]){target=i;break;}
-            if(target<24){
+            unsigned target=kFormPreviewCache;
+            for(unsigned i=0;i<kFormPreviewCache;++i)if(g_formPreviewPixelForms[i]==mapped){target=i;break;}
+            if(target==kFormPreviewCache)for(unsigned i=0;i<kFormPreviewCache;++i)if(!g_formPreviewPixelForms[i]){target=i;break;}
+            if(target<kFormPreviewCache){
                 for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[target][b]=previewRecord[8+b];
                 g_formPreviewPixelForms[target]=mapped;
             }
@@ -1816,7 +1820,7 @@ void load_impl(SKSESerializationInterface* serial){
 void revert_impl(SKSESerializationInterface*){
     queue_state(g_defaultState);
     AcquireSRWLockExclusive(&g_previewDataLock);
-    for(unsigned i=0;i<24;++i)g_formPreviewPixelForms[i]=0;
+    for(unsigned i=0;i<kFormPreviewCache;++i)g_formPreviewPixelForms[i]=0;
     ReleaseSRWLockExclusive(&g_previewDataLock);
     InterlockedExchange(&g_previewCacheClearPixels,1);InterlockedExchange(&g_previewCacheResetPending,1);
     file_log("RunicWheelLE: SKSE co-save REVERT requested\r\n");
@@ -2427,7 +2431,7 @@ void release_theme(){
     drop(g_frameAtlas);g_frameAtlas=nullptr;
     drop(g_fontAtlas);g_fontAtlas=nullptr;
     drop(g_plaqueAtlas);g_plaqueAtlas=nullptr;
-    for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    for(unsigned i=0;i<kFormPreviewCache;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     g_atlasOwner=nullptr;g_iconAtlasChecked=0;
 }
@@ -2830,7 +2834,7 @@ void draw_labels(float width,float height){
         }
         if(g_iconAtlas && g_firstThemeEnabled){
         int cacheSlot=-1;
-            for(int ci=0;ci<24;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
+            for(int ci=0;ci<(int)kFormPreviewCache;++ci)if(g_formPreviewForms[ci]==b.formId){cacheSlot=ci;break;}
             const bool hasItemPreview=b.kind!=rw05::Spell&&cacheSlot>=0&&g_formPreviewTextures[cacheSlot];
             const unsigned iconId=g_iconIndices[wheel][sector][index];
             float visibleIconSize=outer*.398f;
@@ -3089,11 +3093,11 @@ Raw create_preview_outline_texture(Raw device,const unsigned char* pixels){
 void restore_cached_form_previews(Raw device){
     if(!device)return;
     if(g_formPreviewDevice!=device){
-        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;
+        for(unsigned i=0;i<kFormPreviewCache;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;
             drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
         g_formPreviewDevice=device;
     }
-    for(unsigned i=0;i<24;++i){
+    for(unsigned i=0;i<kFormPreviewCache;++i){
         unsigned char pixels[kFormPreviewBytes];DWord form=0;
         AcquireSRWLockShared(&g_previewDataLock);
         form=g_formPreviewPixelForms[i];
@@ -3200,15 +3204,18 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord 
     }
     reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
     if(g_formPreviewDevice!=device){
-        for(unsigned i=0;i<24;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+        for(unsigned i=0;i<kFormPreviewCache;++i){drop(g_formPreviewTextures[i]);g_formPreviewTextures[i]=nullptr;drop(g_formPreviewOutlineTextures[i]);g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
         g_formPreviewDevice=device;g_formPreviewNext=0;
     }
     int cacheSlot=-1;
     AcquireSRWLockShared(&g_previewDataLock);
-    for(unsigned i=0;i<24;++i)if(g_formPreviewPixelForms[i]==formId){cacheSlot=(int)i;break;}
-    if(cacheSlot<0)for(unsigned i=0;i<24;++i)if(!g_formPreviewPixelForms[i]){cacheSlot=(int)i;break;}
+    for(unsigned i=0;i<kFormPreviewCache;++i)if(g_formPreviewPixelForms[i]==formId){cacheSlot=(int)i;break;}
+    if(cacheSlot<0)for(unsigned i=0;i<kFormPreviewCache;++i)if(!g_formPreviewPixelForms[i]){cacheSlot=(int)i;break;}
     ReleaseSRWLockShared(&g_previewDataLock);
-    if(cacheSlot<0)cacheSlot=(int)(g_formPreviewNext++%24u);
+    if(cacheSlot<0){
+        cacheSlot=(int)(g_formPreviewNext++%kFormPreviewCache);
+        log_item_refusal("preview cache full; evicting oldest thumbnail (type unused)",g_formPreviewPixelForms[cacheSlot],0);
+    }
     bool persistedPixels=false;
     LockedRectangle copySrc{};
     if(succeeded(reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&copySrc,nullptr,0))&&
@@ -3354,7 +3361,7 @@ void finish_inventory_preview_capture(Raw device){
     drop(captured);drop(back);
 }
 void clear_form_preview_cache(){
-    for(unsigned i=0;i<24;++i){
+    for(unsigned i=0;i<kFormPreviewCache;++i){
         Raw texture=g_formPreviewTextures[i];Raw outline=g_formPreviewOutlineTextures[i];
         g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;
         g_formPreviewOutlineTextures[i]=nullptr;drop(texture);drop(outline);
@@ -3362,16 +3369,16 @@ void clear_form_preview_cache(){
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     if(InterlockedExchange(&g_previewCacheClearPixels,0)){
         AcquireSRWLockExclusive(&g_previewDataLock);
-        for(unsigned i=0;i<24;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
+        for(unsigned i=0;i<kFormPreviewCache;++i){g_formPreviewPixelForms[i]=0;for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[i][b]=0;}
         ReleaseSRWLockExclusive(&g_previewDataLock);
     }
 }
 int preview_cache_reset_fault(){
-    for(unsigned i=0;i<24;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
+    for(unsigned i=0;i<kFormPreviewCache;++i){g_formPreviewTextures[i]=nullptr;g_formPreviewOutlineTextures[i]=nullptr;g_formPreviewForms[i]=0;}
     g_formPreviewDevice=nullptr;g_formPreviewNext=0;
     if(InterlockedExchange(&g_previewCacheClearPixels,0)){
         AcquireSRWLockExclusive(&g_previewDataLock);
-        for(unsigned i=0;i<24;++i)g_formPreviewPixelForms[i]=0;
+        for(unsigned i=0;i<kFormPreviewCache;++i)g_formPreviewPixelForms[i]=0;
         ReleaseSRWLockExclusive(&g_previewDataLock);
     }
     file_log("RunicWheelLE: preview cache reset faulted; remaining thumbnails will be ignored\r\n");
