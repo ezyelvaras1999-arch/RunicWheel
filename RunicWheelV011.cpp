@@ -662,7 +662,7 @@ static rw21::Modifiers g_modifiers{};
 static rw21::Pending g_advancedPending{};
 static int g_enableAdvancedEditor=1,g_showEditorHelp=1,g_showWheelControlsGuide=1,g_showWheelOccupancy=1,g_quickSectorKeys=0;
 static int g_showAllStackPreviews=1,g_showStackPositionDots=1;
-static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2,g_showEquipHint=1; // v0.27
+static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2,g_showEquipHint=1,g_badgeAbovePreviews=1; // v0.27
 static volatile Long g_lastInputDevice=1; // 1 mouse/keyboard, 2 gamepad: picks the M1/M2 or RB/LB wording
 static volatile Long g_editorDisplay=0; // code for visible status, never a TESV pointer
 static int g_clearArmedWheel=-1,g_clearArmedSector=-1;
@@ -1464,6 +1464,7 @@ void load_config(){
     g_showEquippedHighlight=value("ShowEquippedHighlight",1,0,1);
     g_equippedBadgeMode=value("EquippedInputBadge",2,0,2);
     g_showEquipHint=value("EquipHint",1,0,1);
+    g_badgeAbovePreviews=value("EquippedBadgeAbovePreviews",1,0,1);
     g_magicSchoolAccents=value("ShowMagicSchoolAccents",1,0,1);
     // Never steal Skyrim's F2-F5 keys, even when a legacy INI requests it.
     if(g_itemPreviousKey>=0x3C && g_itemPreviousKey<=0x3F)g_itemPreviousKey=0;
@@ -2646,10 +2647,11 @@ const char* hand_input_name(bool right){
 }
 // Black plate with white letters (the look of the quantity label), readable over any highlight.
 // (x,y) is the top-left corner; returns the plate width.
-float draw_input_chip(float x,float y,const char* t){
+float draw_input_chip(float x,float y,const char* t,bool aboveArt){
     unsigned len=0;while(t[len])++len;
     const float h=24.f,w=14.f+9.5f*(float)len;
-    quantity_rect(x,y,w,h,tinted(0xf2000000u));
+    if(aboveArt)quantity_rect(x,y,w,h,tinted(0xf2000000u)); // overlay pass: above the 3D previews
+    else mark_quad(x,y,w,h,tinted(0xf2000000u));            // label pass: same path as the transient messages
     if(g_fontAtlas)text_in(x+w*.5f,y+3.f,h-3.f,w-4.f,15.f,t,0xffffffffu);
     else draw_text(x+4.f,y+7.f,1.6f,t,0xffffffffu);
     return w;
@@ -2660,7 +2662,7 @@ void draw_equipped_badge(float x,float y,float art,unsigned m){
     if(m&4u)cat_text(t,sizeof t,"SHOUT");
     else if((m&3u)==3u){cat_text(t,sizeof t,hand_input_name(true));cat_text(t,sizeof t,"+");cat_text(t,sizeof t,hand_input_name(false));}
     else cat_text(t,sizeof t,hand_input_name((m&2u)!=0));
-    draw_input_chip(x-art*.5f,y+art*.5f-24.f*.9f,t);
+    draw_input_chip(x-art*.5f,y+art*.5f-24.f*.9f,t,g_badgeAbovePreviews!=0);
 }
 // ---- selected-slot hint: what the next press does (EQUIP / UNEQUIP) and which input does it --------
 struct EquipHint{bool valid;bool unequip;unsigned inputs;}; // inputs: 1 right-hand input, 2 left-hand input, 4 both hands
@@ -2691,12 +2693,15 @@ EquipHint equip_hint(const rw05::Binding& b,unsigned iconId){
     }
     return h;
 }
+static constexpr float kEquipHintBlockH=50.f+3.f+24.f; // message plate + gap + input chips
 void draw_equip_hint(float cx,float top,const EquipHint& h){
-    const float boxW=156.f,boxH=34.f;
-    quantity_rect(cx-boxW*.5f,top,boxW,boxH,tinted(h.unequip?0xf0731820u:0xf01f6f37u)); // dark red / green
+    const float boxH=50.f;
+    // Same plate as the transient messages (224x50, thin underline), green for EQUIP and dark red for UNEQUIP.
+    mark_quad(cx-112.f,top,224.f,boxH,tinted(h.unequip?0xe0731820u:0xe01f6f37u));
+    mark_quad(cx-87.f,top+43.f,174.f,1.8f,tinted(h.unequip?0xffe6a0a0u:0xff9de6b0u));
     const char* title=h.unequip?"UNEQUIP":"EQUIP";
-    if(g_fontAtlas)text_in(cx,top+3.f,boxH-3.f,boxW-14.f,21.f,title,0xffffffffu);
-    else draw_text(cx-60.f,top+8.f,2.4f,title,0xffffffffu);
+    if(g_fontAtlas)text_in(cx,top+3.f,38.f,204.f,22.f,title,0xffffffffu);
+    else draw_text(cx-89.f,top+7.f,3.65f,title,0xffffffffu);
     const char* chip[2]={nullptr,nullptr};int n=0;
     char both[24]{};
     if(h.inputs&4u){
@@ -2711,7 +2716,7 @@ void draw_equip_hint(float cx,float top,const EquipHint& h){
     total+=gap*(float)(n>0?n-1:0);
     float x=cx-total*.5f;
     const float y=top+boxH+3.f;                       // close under the message
-    for(int i=0;i<n;++i)x+=draw_input_chip(x,y,chip[i])+gap;
+    for(int i=0;i<n;++i)x+=draw_input_chip(x,y,chip[i],false)+gap;
 }
 void add_mini_art_icon(float x,float y,unsigned id,float outer,bool selected){
     if(!g_iconAtlas || g_miniArtVert+6>8*6)return;
@@ -3201,18 +3206,20 @@ void draw_labels(float width,float height){
             transientShown=true;
             const float rise=g_reduceMotion?0.f:4.f*(1.f-feedbackFade);
             const float fy=cy+outer*.38f-rise;
-            mark_quad(cx-112.f,fy,224.f,50.f,tinted(rw16::with_alpha(0xe0182830u,feedbackFade)));
+            const DWord boxFill=code==3?0xe01f6f37u:code==6?0xe0731820u:code==7?0xe0000000u:0xe0182830u; // green / dark red / black
+            const bool whiteText=code==3||code==6||code==7;
+            mark_quad(cx-112.f,fy,224.f,50.f,tinted(rw16::with_alpha(boxFill,feedbackFade)));
             mark_quad(cx-87.f,fy+43.f,174.f*feedbackFade,1.8f,tinted(rw16::with_alpha(code==4?0xffba7567u:0xffdfbd78u,feedbackFade)));
-            if(g_fontAtlas)text_in(cx,fy+3.f,38.f,204.f,22.f,msg,rw16::with_alpha(code==4?0xffffa493u:0xffaef4c3u,feedbackFade));
-            else draw_text(cx-89.f,fy+7.f,3.65f,msg,rw16::with_alpha(0xffaef4c3u,feedbackFade));
+            const DWord msgColor=whiteText?0xffffffffu:(code==4?0xffffa493u:0xffaef4c3u);
+            if(g_fontAtlas)text_in(cx,fy+3.f,38.f,204.f,22.f,msg,rw16::with_alpha(msgColor,feedbackFade));
+            else draw_text(cx-89.f,fy+7.f,3.65f,msg,rw16::with_alpha(msgColor,feedbackFade));
         }
     }
     if(equipHint.valid&&!transientShown){
         // Same anchor as the transient messages, but never lower than the top of the bottom slot's art
         // (slots sit at .66*outer with art about .17*outer around them), so a small wheel does not overlap it.
-        const float hintBlockH=34.f+3.f+24.f;
         float hintTop=cy+outer*.38f;
-        const float hintMax=cy+outer*.45f-hintBlockH;
+        const float hintMax=cy+outer*.45f-kEquipHintBlockH;
         if(hintTop>hintMax)hintTop=hintMax;
         draw_equip_hint(cx,hintTop,equipHint);
     }
@@ -3919,8 +3926,13 @@ int draw(Raw device){
         if(miniSlot>=0&&g_formPreviewTextures[miniSlot])
             ok=draw_textured_pass(device,g_formPreviewTextures[miniSlot],&g_miniPreviewQuads[sector*6],2);
     }
-    if(ok&&g_quantityLabelVert>0)
+    if(ok&&g_quantityLabelVert>0){
+        // The textured passes above leave their FVF (0x144, 28-byte vertices) and texture bound. These overlay
+        // vertices are untextured (20 bytes), so without this reset their texture coordinates are read from the
+        // next vertex and the fill comes out transparent: only the text (its own pass) was visible.
+        reset_texture_pass(device);
         ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_quantityLabelVert/3),g_quantityLabels,sizeof(Vertex)));
+    }
     if(ok && g_fontAtlas && g_fontVertexCount)ok=draw_textured_pass(device,g_fontAtlas,g_fontQuads,(UInit)(g_fontVertexCount/3));
     reset_texture_pass(device);
     if(ok)InterlockedExchange(&g_drawStep,0);
