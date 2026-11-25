@@ -172,6 +172,11 @@ static int g_fontVertexCount=0;
 static int g_artVertexCount=0;
 static int g_miniArtVert=0;
 static int g_miniCount=0;
+// v0.27: stack miniature drawn from the cached 3D thumbnail, and the equipped-slot backing plate.
+static TextureVertex g_miniPreviewQuads[8*6];
+static int g_miniPreviewSectorCache[8]={-1,-1,-1,-1,-1,-1,-1,-1};
+static Vertex g_equipBack[8*96];
+static int g_equipBackVert=0;
 static volatile Long g_guideEditorLogged=0, g_previewLogged=0;
 static Raw g_iconAtlas=nullptr;
 static Raw g_frameAtlas=nullptr;
@@ -657,6 +662,8 @@ static rw21::Modifiers g_modifiers{};
 static rw21::Pending g_advancedPending{};
 static int g_enableAdvancedEditor=1,g_showEditorHelp=1,g_showWheelControlsGuide=1,g_showWheelOccupancy=1,g_quickSectorKeys=0;
 static int g_showAllStackPreviews=1,g_showStackPositionDots=1;
+static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2; // v0.27
+static volatile Long g_lastInputDevice=1; // 1 mouse/keyboard, 2 gamepad: picks the M1/M2 or RB/LB wording
 static volatile Long g_editorDisplay=0; // code for visible status, never a TESV pointer
 static int g_clearArmedWheel=-1,g_clearArmedSector=-1;
 static DWord g_clearArmedTick=0;
@@ -1123,9 +1130,17 @@ void perform_action(const ActionRequest& request){
         // A power or lesser power gets NO slot, exactly like the MagicMenu without a
         // hand (0x0087419D): EquipSpell then picks the voice slot (0x006EDD00).
         Raw spellSlot=rw26::spell_takes_hand(spellType)?slot:nullptr;
+        // EquipSpell (0x006EFAC0) toggles: it compares the spell with the hand slot (Actor+0x118 left,
+        // +0x11C right) or with the voice slot (Actor+0x128, the same field a shout uses) and, when it is
+        // already there, takes the unequip path. Read that state first so the label tells the truth.
+        const unsigned char* actorBytes=(const unsigned char*)actor; // readable(actor,0x140) checked above
+        const Raw heldNow=spellSlot?*(Raw*)(actorBytes+(request.hand==0?0x118:0x11C)):*(Raw*)(actorBytes+0x128);
+        const bool wasEquipped=heldNow==form;
         reinterpret_cast<GameEquipSpell>(0x006EFAC0)(manager,actor,form,spellSlot);
-        action_diagnostic(spellSlot?"RunicWheelLE: SPELL native EquipSpell request submitted (result needs game validation)\r\n":
-                          "RunicWheelLE: POWER native EquipSpell request submitted, voice slot chosen by the game\r\n",3);return;
+        action_diagnostic(wasEquipped?(spellSlot?"RunicWheelLE: SPELL was equipped in this hand; native EquipSpell takes the unequip path\r\n":
+                                                 "RunicWheelLE: POWER was equipped; native EquipSpell takes the unequip path\r\n"):
+                          spellSlot?"RunicWheelLE: SPELL native EquipSpell request submitted (result needs game validation)\r\n":
+                          "RunicWheelLE: POWER native EquipSpell request submitted, voice slot chosen by the game\r\n",wasEquipped?6:3);return;
     }
     if(kind==rw05::Shout){
         if(!g_enableSpellActions){
@@ -1139,8 +1154,12 @@ void perform_action(const ActionRequest& request){
         if(reinterpret_cast<Raw (__thiscall*)(Raw)>(0x006E8AA0)(actor)){
           action_diagnostic("RunicWheelLE: SHOUT refused while shouting (vanilla sFailShouting rule)\r\n",4);return;
         }
+        // EquipShout (0x006F0110) reads the voice slot through 0x006E8A60 (Actor+0x128, only if it is a
+        // shout) and, when it is the same shout, takes the unequip path.
+        const bool shoutWasEquipped=*(Raw*)((const unsigned char*)actor+0x128)==form;
         reinterpret_cast<void (__thiscall*)(Raw,Raw,Raw)>(0x006F0110)(manager,actor,form);
-        action_diagnostic("RunicWheelLE: SHOUT native EquipShout request submitted (toggles like the Magic menu)\r\n",3);return;
+        action_diagnostic(shoutWasEquipped?"RunicWheelLE: SHOUT was equipped; native EquipShout takes the unequip path\r\n":
+                          "RunicWheelLE: SHOUT native EquipShout request submitted (toggles like the Magic menu)\r\n",shoutWasEquipped?6:3);return;
     }
     const bool scroll=formType==0x17;
     if(kind!=rw05::Weapon && kind!=rw05::Armor && kind!=rw05::Consumable && kind!=rw05::Ammo && kind!=rw05::Torch && !scroll){
@@ -1441,6 +1460,9 @@ void load_config(){
     g_showNextPreview=value("ShowNextItemPreview",1,0,1);
     g_showAllStackPreviews=value("ShowAllStackPreviews",1,0,1);
     g_showStackPositionDots=value("ShowStackPositionDots",1,0,1);
+    g_stackMini3D=value("StackMiniature3D",1,0,1);
+    g_showEquippedHighlight=value("ShowEquippedHighlight",1,0,1);
+    g_equippedBadgeMode=value("EquippedInputBadge",2,0,2);
     g_magicSchoolAccents=value("ShowMagicSchoolAccents",1,0,1);
     // Never steal Skyrim's F2-F5 keys, even when a legacy INI requests it.
     if(g_itemPreviousKey>=0x3C && g_itemPreviousKey<=0x3F)g_itemPreviousKey=0;
@@ -1929,6 +1951,8 @@ int khaos_capture_input(InputEvent* event);
 void khaos_pad_event(InputEvent* event);
 int process_event(InputEvent* event){
     if(!event)return 0;
+    if(event->device==2&&(event->type==0||event->type==3))InterlockedExchange(&g_lastInputDevice,2);
+    else if(event->device==1&&event->type==0)InterlockedExchange(&g_lastInputDevice,1);
     // Foreground ownership is checked BEFORE modal configuration capture.
     // KHA-OS cannot starve Skyrim/Windows if another window gains focus.
     if(g_window && GetForegroundWindow()!=g_window){
@@ -2523,6 +2547,116 @@ void add_art_icon(float x,float y,unsigned id,float selected,float outer){
 }
 // The early main-medallion pass MUST NOT carry a miniature: background quads are
 // drawn later and used to cover it. The miniatures live in their own late pass.
+// ---- v0.27 equipped state, read once per frame on the render thread -------------------------------
+// Layout verified in TESV.exe 1.9.32.0: Actor+0x118/+0x11C = left/right hand spell, Actor+0x128 = voice
+// slot (a shout, or a power), Actor+0x88 -> process, process+0x68 = equipped object [left,right].
+struct EquippedNow{DWord left,right,leftSpell,rightSpell,voice;bool valid;};
+static EquippedNow g_equippedNow{};
+DWord equipped_form_id(Raw object){
+    if(!object||!readable(object,0x14,0))return 0;
+    return *(const DWord*)((const unsigned char*)object+0x0C);
+}
+void read_equipped_now(){
+    EquippedNow e{};
+    __try{
+        if(readable((Raw)0x01B2E8E4,4,0)){
+            Raw actor=*(Raw*)0x01B2E8E4;
+            if(readable(actor,0x140,0)){
+                const unsigned char* a=(const unsigned char*)actor;
+                e.leftSpell=equipped_form_id(*(Raw*)(a+0x118));
+                e.rightSpell=equipped_form_id(*(Raw*)(a+0x11C));
+                e.voice=equipped_form_id(*(Raw*)(a+0x128));
+                Raw process=*(Raw*)(a+0x88);
+                if(readable(process,0x70,0)){
+                    e.left=equipped_form_id(*(Raw*)((const unsigned char*)process+0x68));
+                    e.right=equipped_form_id(*(Raw*)((const unsigned char*)process+0x6C));
+                }
+                e.valid=true;
+            }
+        }
+    }__except(1){e=EquippedNow{};}
+    g_equippedNow=e;
+}
+// bit0 left hand, bit1 right hand, bit2 voice (shout or power). Body armor is not tracked.
+unsigned equipped_mask(const rw05::Binding& b,unsigned iconId){
+    const EquippedNow& e=g_equippedNow;
+    if(!e.valid||!b.formId)return 0;
+    const DWord f=b.formId;unsigned m=0;
+    if(b.kind==rw05::Shout)return e.voice==f?4u:0u;
+    if(b.kind==rw05::Spell){
+        if(e.leftSpell==f)m|=1u;
+        if(e.rightSpell==f)m|=2u;
+        if(e.voice==f)m|=4u;
+        return m;
+    }
+    if(b.kind==rw05::Weapon||b.kind==rw05::Armor||b.kind==rw05::Torch||b.kind==rw05::Consumable){
+        if(e.left==f)m|=1u;
+        if(e.right==f)m|=2u;
+        // Two-handed weapons (greatsword, battleaxe/warhammer, bow, crossbow) occupy both hands.
+        if(m&&b.kind==rw05::Weapon&&(iconId==rw14::Greatsword||iconId==rw14::Warhammer||iconId==rw14::Bow||iconId==rw14::Crossbow))m=3u;
+    }
+    return m;
+}
+void cat_text(char* dst,unsigned cap,const char* src){
+    unsigned n=0;while(dst[n])++n;
+    for(unsigned i=0;src[i]&&n+1<cap;++i)dst[n++]=src[i];
+    dst[n]=0;
+}
+const char* pad_button_name(int mask){
+    switch(mask){
+        case 4096:return "A";case 8192:return "B";case 16384:return "X";case 32768:return "Y";
+        case 256:return "LB";case 512:return "RB";case 9:return "LT";case 10:return "RT";
+        case 1:return "UP";case 2:return "DOWN";case 4:return "LEFT";case 8:return "RIGHT";
+        case 16:return "START";case 32:return "BACK";case 64:return "L3";case 128:return "R3";
+        default:return "PAD";
+    }
+}
+void quantity_rect(float x,float y,float w,float h,DWord col){
+    if(g_quantityLabelVert+6>(int)(sizeof(g_quantityLabels)/sizeof(g_quantityLabels[0])))return;
+    Vertex& a=g_quantityLabels[g_quantityLabelVert++];vertex(a,x,y,col);
+    Vertex& b=g_quantityLabels[g_quantityLabelVert++];vertex(b,x+w,y,col);
+    Vertex& c=g_quantityLabels[g_quantityLabelVert++];vertex(c,x+w,y+h,col);
+    Vertex& d=g_quantityLabels[g_quantityLabelVert++];vertex(d,x,y,col);
+    Vertex& e=g_quantityLabels[g_quantityLabelVert++];vertex(e,x+w,y+h,col);
+    Vertex& f=g_quantityLabels[g_quantityLabelVert++];vertex(f,x,y+h,col);
+}
+// Plate drawn BEHIND the item art (own buffer, drawn right after the sector fills): larger than the art,
+// low alpha and no glow, so an equipped slot reads as bigger rather than brighter.
+void equip_disc(float cx,float cy,float r,DWord col){
+    static const float px[16]={1.f,.92388f,.70711f,.38268f,0.f,-.38268f,-.70711f,-.92388f,-1.f,-.92388f,-.70711f,-.38268f,0.f,.38268f,.70711f,.92388f};
+    static const float py[16]={0.f,.38268f,.70711f,.92388f,1.f,.92388f,.70711f,.38268f,0.f,-.38268f,-.70711f,-.92388f,-1.f,-.92388f,-.70711f,-.38268f};
+    if(g_equipBackVert+48>(int)(sizeof(g_equipBack)/sizeof(g_equipBack[0])))return;
+    for(int i=0;i<16;++i){
+        const int next=(i+1)&15;
+        vertex(g_equipBack[g_equipBackVert++],cx,cy,col);
+        vertex(g_equipBack[g_equipBackVert++],cx+px[i]*r,cy+py[i]*r,col);
+        vertex(g_equipBack[g_equipBackVert++],cx+px[next]*r,cy+py[next]*r,col);
+    }
+}
+void add_equipped_backing(float cx,float cy,float artSize){
+    const float r=artSize*.58f; // 8 sectors: stays clear of the neighbouring plate even for large weapon previews
+    equip_disc(cx,cy,r,tinted(0x30dbba7du));
+    equip_disc(cx,cy,r*.86f,tinted(0x38c9a455u));
+}
+// Input marker at the lower-left of the art: the hand(s) the item is equipped in, or the shout key.
+void draw_equipped_badge(float x,float y,float art,unsigned m){
+    const bool pad=InterlockedCompareExchange(&g_lastInputDevice,0,0)==2;
+    char t[24]{};
+    if(m&4u)cat_text(t,sizeof t,"SHOUT");
+    else{
+        const char* rightName=pad?pad_button_name(g_cfg.padPrimary):"M1";
+        const char* leftName=pad?pad_button_name(g_cfg.padSecondary):"M2";
+        if((m&3u)==3u){cat_text(t,sizeof t,rightName);cat_text(t,sizeof t,"+");cat_text(t,sizeof t,leftName);}
+        else cat_text(t,sizeof t,(m&2u)?rightName:leftName);
+    }
+    unsigned len=0;while(t[len])++len;
+    const float h=24.f,w=14.f+9.5f*(float)len;
+    const float bx=x-art*.5f,by=y+art*.5f-h*.9f;
+    quantity_rect(bx,by,w,h,tinted(0xe6121c26u));
+    quantity_rect(bx,by,w,2.f,tinted(0xffdbba7du));
+    if(g_fontAtlas)text_in(bx+w*.5f,by+3.f,h-3.f,w-4.f,15.f,t,0xfff4e3b4u);
+    else draw_text(bx+4.f,by+7.f,1.6f,t,0xfff4e3b4u);
+}
 void add_mini_art_icon(float x,float y,unsigned id,float outer,bool selected){
     if(!g_iconAtlas || g_miniArtVert+6>8*6)return;
     if(id>=rw14::Count)id=rw14::Misc;
@@ -2701,6 +2835,9 @@ Nameplate nameplate(float width,float height,float cx,float cy,float outer,const
 void draw_labels(float width,float height){
     g_labelVert=0;g_quantityLabelVert=0;g_artVertexCount=0;g_miniArtVert=0;g_miniCount=0;g_fontVertexCount=0;
     for(int i=0;i<8;++i)g_formPreviewSectorCache[i]=-1;
+    for(int i=0;i<8;++i)g_miniPreviewSectorCache[i]=-1;
+    g_equipBackVert=0;
+    read_equipped_now();
     const float d=width<height?width:height;
     float outer=d*.31f*(float)g_cfg.wheelScale/100.f;
     if(outer>440.f)outer=440.f; if(outer>height*.44f)outer=height*.44f;
@@ -2820,6 +2957,7 @@ void draw_labels(float width,float height){
         const rw05::Binding& b=slot.item[index];
         const float x=cx+ux*outer*.66f,y=cy+uy*outer*.66f;
         const bool active=selected==sector;
+        const unsigned eqMask=(g_showEquippedHighlight||g_equippedBadgeMode)?equipped_mask(b,g_iconIndices[wheel][sector][index]):0u;
         const DWord accent=b.kind==rw05::Weapon?0xffffd69au:
           b.kind==rw05::Armor?0xffc0e0ffu:b.kind==rw05::Spell?0xffc9b8ffu:
           b.kind==rw05::Consumable?0xff98edc7u:b.kind==rw05::Ammo?0xffffe4a4u:0xffe2cee8u;
@@ -2853,8 +2991,10 @@ void draw_labels(float width,float height){
             }
             if(hasItemPreview){
                 int outlineQuad=sector*6;
-                quad_tex(g_formPreviewOutlineQuads,outlineQuad,x-previewSize*.5f,y-previewSize*.5f,
-                    previewSize,previewSize,item_class_color((rw05::Kind)b.kind,iconId),0.f,0.f,1.f,1.f);
+                // Equipped: the border behind the render is drawn larger, not brighter.
+                const float outlineSize=(eqMask&&g_showEquippedHighlight)?previewSize*1.12f:previewSize;
+                quad_tex(g_formPreviewOutlineQuads,outlineQuad,x-outlineSize*.5f,y-outlineSize*.5f,
+                    outlineSize,outlineSize,item_class_color((rw05::Kind)b.kind,iconId),0.f,0.f,1.f,1.f);
             }
             if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
                 const unsigned next=rw20::preview_index(index,slot.count);
@@ -2864,7 +3004,19 @@ void draw_labels(float width,float height){
                 const float bx=x+off,by=y+off*.80f;
                 const float r=outer*(active?.100f:.090f);
                 (void)r;
-                add_mini_art_icon(bx,by,g_iconIndices[wheel][sector][next],outer,active);
+                // The next item is drawn from its cached 3D thumbnail when there is one (same quad cost as the
+                // main preview, no capture and no readback); otherwise the flat atlas icon as before.
+                int miniCache=-1;
+                const rw05::Binding& nextBinding=slot.item[next];
+                if(g_stackMini3D&&nextBinding.kind!=rw05::Spell&&nextBinding.formId)
+                    for(int ci=0;ci<(int)kFormPreviewCache;++ci)if(g_formPreviewForms[ci]==nextBinding.formId){miniCache=ci;break;}
+                if(miniCache>=0&&g_formPreviewTextures[miniCache]){
+                    float miniSize=outer*(active?.177f:.156f);if(miniSize>78.f)miniSize=78.f;
+                    miniSize*=((float)g_iconScalePercent/100.f);
+                    int miniQuad=sector*6;
+                    quad_tex(g_miniPreviewQuads,miniQuad,bx-miniSize*.5f,by-miniSize*.5f,miniSize,miniSize,0xffffffffu,0.f,0.f,1.f,1.f);
+                    g_miniPreviewSectorCache[sector]=miniCache;
+                }else add_mini_art_icon(bx,by,g_iconIndices[wheel][sector][next],outer,active);
                 if(g_showStackPositionDots){
                     for(unsigned dot=0;dot<slot.count;++dot){
                         const float dx=bx-((float)slot.count-1.f)*5.0f+(float)dot*10.f;
@@ -2877,6 +3029,10 @@ void draw_labels(float width,float height){
             mark_quad(x-32.f,y-31.f,64.f,61.f,tinted(0x9b142333u));
             mark_quad(x-32.f,y+27.f,64.f,3.f,tinted(accent));
             draw_category_icon(x,y-6.f,(rw05::Kind)b.kind,accent);
+        }
+        if(eqMask){
+            if(g_showEquippedHighlight)add_equipped_backing(x,y,itemArtSize);
+            if(g_equippedBadgeMode==2||(g_equippedBadgeMode==1&&active))draw_equipped_badge(x,y,itemArtSize,eqMask);
         }
         const Long available= g_inventoryQuantities[wheel][sector][index];
         if(available>=0&&b.kind!=rw05::Weapon&&b.kind!=rw05::Armor&&b.kind!=rw05::Spell&&b.kind!=rw05::Shout){
@@ -3006,6 +3162,9 @@ void apply_presentation(float width,float height){
     for(int i=0;i<g_labelVert;++i)apply_to_vertex(g_labels[i],cx,cy,scale,opacity);
     for(int i=0;i<g_quantityLabelVert;++i)apply_to_vertex(g_quantityLabels[i],cx,cy,scale,opacity);
     for(int i=0;i<g_artVertexCount;++i)apply_to_vertex(g_artQuads[i],cx,cy,scale,opacity);
+    for(int i=0;i<g_equipBackVert;++i)apply_to_vertex(g_equipBack[i],cx,cy,scale,opacity);
+    for(int sector=0;sector<8;++sector)if(g_miniPreviewSectorCache[sector]>=0)
+        for(int i=sector*6;i<sector*6+6;++i)apply_to_vertex(g_miniPreviewQuads[i],cx,cy,scale,opacity);
     for(int sector=0;sector<8;++sector)if(g_formPreviewSectorCache[sector]>=0)
         for(int i=sector*6;i<sector*6+6;++i){apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);apply_to_vertex(g_formPreviewOutlineQuads[i],cx,cy,scale,opacity);}
     for(int i=0;i<6;++i){apply_to_vertex(g_frameQuads[i],cx,cy,scale,opacity);
@@ -3655,6 +3814,7 @@ int draw(Raw device){
     } __finally {ReleaseSRWLockShared(&g_catalogLock);}
     ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_sectorCount*2),g_geometry,sizeof(Vertex)));
     if(ok && triangles>0)ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)triangles,g_pips,sizeof(Vertex)));
+    if(ok && g_equipBackVert>0)ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_equipBackVert/3),g_equipBack,sizeof(Vertex)));
     // Draw order: translucent sectors -> ornamental frame -> independent icons
     // -> geometrical caption backgrounds -> Unicode text. All state restored.
     if(ok && g_frameAtlas && g_showDecorativeFrame)ok=draw_textured_pass(device,g_frameAtlas,g_frameQuads,2);
@@ -3677,6 +3837,11 @@ int draw(Raw device){
         const int cacheSlot=g_formPreviewSectorCache[sector];
         if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot])
             ok=draw_textured_pass(device,g_formPreviewTextures[cacheSlot],&g_formPreviewQuads[sector*6],2);
+    }
+    for(int sector=0;ok&&sector<8;++sector){ // stack miniatures from the 3D cache, above the main previews
+        const int miniSlot=g_miniPreviewSectorCache[sector];
+        if(miniSlot>=0&&g_formPreviewTextures[miniSlot])
+            ok=draw_textured_pass(device,g_formPreviewTextures[miniSlot],&g_miniPreviewQuads[sector*6],2);
     }
     if(ok&&g_quantityLabelVert>0)
         ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_quantityLabelVert/3),g_quantityLabels,sizeof(Vertex)));
