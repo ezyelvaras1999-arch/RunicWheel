@@ -662,7 +662,7 @@ static rw21::Modifiers g_modifiers{};
 static rw21::Pending g_advancedPending{};
 static int g_enableAdvancedEditor=1,g_showEditorHelp=1,g_showWheelControlsGuide=1,g_showWheelOccupancy=1,g_quickSectorKeys=0;
 static int g_showAllStackPreviews=1,g_showStackPositionDots=1;
-static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2; // v0.27
+static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2,g_showEquipHint=1; // v0.27
 static volatile Long g_lastInputDevice=1; // 1 mouse/keyboard, 2 gamepad: picks the M1/M2 or RB/LB wording
 static volatile Long g_editorDisplay=0; // code for visible status, never a TESV pointer
 static int g_clearArmedWheel=-1,g_clearArmedSector=-1;
@@ -1463,6 +1463,7 @@ void load_config(){
     g_stackMini3D=value("StackMiniature3D",1,0,1);
     g_showEquippedHighlight=value("ShowEquippedHighlight",1,0,1);
     g_equippedBadgeMode=value("EquippedInputBadge",2,0,2);
+    g_showEquipHint=value("EquipHint",1,0,1);
     g_magicSchoolAccents=value("ShowMagicSchoolAccents",1,0,1);
     // Never steal Skyrim's F2-F5 keys, even when a legacy INI requests it.
     if(g_itemPreviousKey>=0x3C && g_itemPreviousKey<=0x3F)g_itemPreviousKey=0;
@@ -2336,7 +2337,7 @@ static const Glyph kGlyphs[]={
  {'?',{14,17,1,2,4,0,4}},{' ',{0,0,0,0,0,0,0}}
 };
 static int g_labelVert=0;
-static Vertex g_quantityLabels[8*96];
+static Vertex g_quantityLabels[8*96+256]; // v0.27: room for the equipped badges and the EQUIP hint on a full wheel
 static int g_quantityLabelVert=0;
 void text_at(float midX,float capMid,float width,float fontPx,const char* raw,DWord col);
 void text_in(float midX,float boxY,float boxH,float width,float fontPx,const char* raw,DWord col,float fill=.62f);
@@ -2638,24 +2639,79 @@ void add_equipped_backing(float cx,float cy,float artSize){
     equip_disc(cx,cy,r,tinted(0x30dbba7du));
     equip_disc(cx,cy,r*.86f,tinted(0x38c9a455u));
 }
-// Input marker at the lower-left of the art: the hand(s) the item is equipped in, or the shout key.
-void draw_equipped_badge(float x,float y,float art,unsigned m){
+// Name of the input that drives a hand: M1/M2 with mouse and keyboard, the configured buttons with a gamepad.
+const char* hand_input_name(bool right){
     const bool pad=InterlockedCompareExchange(&g_lastInputDevice,0,0)==2;
-    char t[24]{};
-    if(m&4u)cat_text(t,sizeof t,"SHOUT");
-    else{
-        const char* rightName=pad?pad_button_name(g_cfg.padPrimary):"M1";
-        const char* leftName=pad?pad_button_name(g_cfg.padSecondary):"M2";
-        if((m&3u)==3u){cat_text(t,sizeof t,rightName);cat_text(t,sizeof t,"+");cat_text(t,sizeof t,leftName);}
-        else cat_text(t,sizeof t,(m&2u)?rightName:leftName);
-    }
+    return pad?pad_button_name(right?g_cfg.padPrimary:g_cfg.padSecondary):(right?"M1":"M2");
+}
+// Black plate with white letters (the look of the quantity label), readable over any highlight.
+// (x,y) is the top-left corner; returns the plate width.
+float draw_input_chip(float x,float y,const char* t){
     unsigned len=0;while(t[len])++len;
     const float h=24.f,w=14.f+9.5f*(float)len;
-    const float bx=x-art*.5f,by=y+art*.5f-h*.9f;
-    quantity_rect(bx,by,w,h,tinted(0xe6121c26u));
-    quantity_rect(bx,by,w,2.f,tinted(0xffdbba7du));
-    if(g_fontAtlas)text_in(bx+w*.5f,by+3.f,h-3.f,w-4.f,15.f,t,0xfff4e3b4u);
-    else draw_text(bx+4.f,by+7.f,1.6f,t,0xfff4e3b4u);
+    quantity_rect(x,y,w,h,tinted(0xf2000000u));
+    if(g_fontAtlas)text_in(x+w*.5f,y+3.f,h-3.f,w-4.f,15.f,t,0xffffffffu);
+    else draw_text(x+4.f,y+7.f,1.6f,t,0xffffffffu);
+    return w;
+}
+// Marker at the lower-left of the art of an equipped slot: the hand(s) it is equipped in, or SHOUT.
+void draw_equipped_badge(float x,float y,float art,unsigned m){
+    char t[24]{};
+    if(m&4u)cat_text(t,sizeof t,"SHOUT");
+    else if((m&3u)==3u){cat_text(t,sizeof t,hand_input_name(true));cat_text(t,sizeof t,"+");cat_text(t,sizeof t,hand_input_name(false));}
+    else cat_text(t,sizeof t,hand_input_name((m&2u)!=0));
+    draw_input_chip(x-art*.5f,y+art*.5f-24.f*.9f,t);
+}
+// ---- selected-slot hint: what the next press does (EQUIP / UNEQUIP) and which input does it --------
+struct EquipHint{bool valid;bool unequip;unsigned inputs;}; // inputs: 1 right-hand input, 2 left-hand input, 4 both hands
+EquipHint equip_hint(const rw05::Binding& b,unsigned iconId){
+    EquipHint h{false,false,0u};
+    if(!b.formId||!g_equippedNow.valid)return h; // state unknown: say nothing rather than guess
+    const unsigned m=equipped_mask(b,iconId);
+    const unsigned held=m&3u;
+    const bool voice=(m&4u)!=0;
+    const unsigned heldInputs=held==3u?4u:(held==2u?1u:2u);
+    const bool twoHanded=b.kind==rw05::Weapon&&(iconId==rw14::Greatsword||iconId==rw14::Warhammer||iconId==rw14::Bow||iconId==rw14::Crossbow);
+    if(b.kind==rw05::Weapon||(b.kind==rw05::Consumable&&iconId==rw14::Scroll)){
+        // The hand matters: M1 = right, M2 = left (the same weapon moves to the other hand if pressed there).
+        h.valid=true;
+        if(held){h.unequip=true;h.inputs=heldInputs;}else h.inputs=twoHanded?4u:3u;
+    }else if(b.kind==rw05::Spell){
+        h.valid=true;
+        if(held){h.unequip=true;h.inputs=heldInputs;}
+        else{h.unequip=voice;h.inputs=3u;}
+    }else if(b.kind==rw05::Shout){
+        h.valid=true;h.unequip=voice;h.inputs=3u;      // the hand is irrelevant: either input
+    }else if(b.kind==rw05::Torch){
+        h.valid=true;h.unequip=held!=0;h.inputs=3u;
+    }else if(b.kind==rw05::Armor){
+        if(held){h.valid=true;h.unequip=true;h.inputs=3u;}   // a shield held in a hand
+        else if(iconId==rw14::Shield){h.valid=true;h.inputs=3u;}
+        // body armor: worn state is not tracked, so no hint
+    }
+    return h;
+}
+void draw_equip_hint(float cx,float top,const EquipHint& h){
+    const float boxW=156.f,boxH=34.f;
+    quantity_rect(cx-boxW*.5f,top,boxW,boxH,tinted(h.unequip?0xf0731820u:0xf01f6f37u)); // dark red / green
+    const char* title=h.unequip?"UNEQUIP":"EQUIP";
+    if(g_fontAtlas)text_in(cx,top+3.f,boxH-3.f,boxW-14.f,21.f,title,0xffffffffu);
+    else draw_text(cx-60.f,top+8.f,2.4f,title,0xffffffffu);
+    const char* chip[2]={nullptr,nullptr};int n=0;
+    char both[24]{};
+    if(h.inputs&4u){
+        cat_text(both,sizeof both,hand_input_name(true));cat_text(both,sizeof both,"+");cat_text(both,sizeof both,hand_input_name(false));
+        chip[n++]=both;
+    }else{
+        if(h.inputs&1u)chip[n++]=hand_input_name(true);
+        if(h.inputs&2u)chip[n++]=hand_input_name(false);
+    }
+    const float gap=4.f;float total=0.f;
+    for(int i=0;i<n;++i){unsigned len=0;while(chip[i][len])++len;total+=14.f+9.5f*(float)len;}
+    total+=gap*(float)(n>0?n-1:0);
+    float x=cx-total*.5f;
+    const float y=top+boxH+3.f;                       // close under the message
+    for(int i=0;i<n;++i)x+=draw_input_chip(x,y,chip[i])+gap;
 }
 void add_mini_art_icon(float x,float y,unsigned id,float outer,bool selected){
     if(!g_iconAtlas || g_miniArtVert+6>8*6)return;
@@ -3116,6 +3172,14 @@ void draw_labels(float width,float height){
              (InterlockedCompareExchange(&g_menuFlags,0,0)&3)?"HOVER ITEM AND LEFT CLICK":"CHOOSE AN OCCUPIED SECTOR",0xff8fa7b6u);
     }
     const float feedbackFade=rw16::feedback_alpha(g_presentationNow,(DWord)InterlockedCompareExchange(&g_feedbackTick,0,0),(unsigned)g_cfg.feedbackDuration);
+    // v0.27: persistent EQUIP / UNEQUIP hint for the selected slot, never in the add/edit (Inventory/Magic) menus.
+    EquipHint equipHint{false,false,0u};
+    if(g_showEquipHint&&!(InterlockedCompareExchange(&g_menuFlags,0,0)&3)&&selection.formId){
+        const rw05::Slot& hintSlot=g_model.slot[wheel][selected];
+        const unsigned hintIndex=g_model.cursor[wheel][selected]<hintSlot.count?g_model.cursor[wheel][selected]:0;
+        equipHint=equip_hint(selection,g_iconIndices[wheel][selected][hintIndex]);
+    }
+    bool transientShown=false;
     if(feedbackFade>0.f){
         const int code=(int)InterlockedCompareExchange(&g_feedback,0,0);
         const char* msg=code==1?"ADDED":code==2?"REMOVED":code==3?"EQUIP?":code==4?"REFUSED":code==5?"USE?":code==6?"UNEQUIP?":code==7?"QUEUED":code==8?"EAT N/A":code==9?"NEXT ITEM":
@@ -3131,7 +3195,10 @@ void draw_labels(float width,float height){
             rw19::caption(stackMsg,sizeof(stackMsg),"ITEM",g_model.cursor[wheel][selected],picked.count);
             msg=stackMsg;
         }
+        // The late "EQUIP?"/"UNEQUIP?" flash is replaced by the persistent hint where the hint exists.
+        if((code==3||code==6)&&equipHint.valid)msg=nullptr;
         if(msg){
+            transientShown=true;
             const float rise=g_reduceMotion?0.f:4.f*(1.f-feedbackFade);
             const float fy=cy+outer*.38f-rise;
             mark_quad(cx-112.f,fy,224.f,50.f,tinted(rw16::with_alpha(0xe0182830u,feedbackFade)));
@@ -3139,6 +3206,15 @@ void draw_labels(float width,float height){
             if(g_fontAtlas)text_in(cx,fy+3.f,38.f,204.f,22.f,msg,rw16::with_alpha(code==4?0xffffa493u:0xffaef4c3u,feedbackFade));
             else draw_text(cx-89.f,fy+7.f,3.65f,msg,rw16::with_alpha(0xffaef4c3u,feedbackFade));
         }
+    }
+    if(equipHint.valid&&!transientShown){
+        // Same anchor as the transient messages, but never lower than the top of the bottom slot's art
+        // (slots sit at .66*outer with art about .17*outer around them), so a small wheel does not overlap it.
+        const float hintBlockH=34.f+3.f+24.f;
+        float hintTop=cy+outer*.38f;
+        const float hintMax=cy+outer*.45f-hintBlockH;
+        if(hintTop>hintMax)hintTop=hintMax;
+        draw_equip_hint(cx,hintTop,equipHint);
     }
 }
 

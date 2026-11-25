@@ -148,10 +148,10 @@ index 208507b..a8e95ae 100644
      Raw extraTargets[3]={nullptr,nullptr,nullptr};
      SurfaceDesc desc{};
 diff --git a/RunicWheelLE.ini b/RunicWheelLE.ini
-index e6a7506..a1d8420 100644
+index e6a7506..092374a 100644
 --- a/RunicWheelLE.ini
 +++ b/RunicWheelLE.ini
-@@ -97,6 +97,17 @@ ShowNextItemPreview=1
+@@ -97,6 +97,23 @@ ShowNextItemPreview=1
  ShowAllStackPreviews=1
  ; Tiny gold progress markers under miniature previews.
  ShowStackPositionDots=1
@@ -166,10 +166,16 @@ index e6a7506..a1d8420 100644
 +; of the item and says where it is equipped: M1 = right hand, M2 = left hand, M1+M2 = both hands (two-handed
 +; weapons), SHOUT = voice slot. With a gamepad it shows the configured buttons (default RB / LB).
 +EquippedInputBadge=2
++; EquipHint=1: with the wheel open outside the add menus, selecting a slot shows EQUIP (green) or UNEQUIP
++; (dark red) in the centre of the wheel, with the input that does it underneath: M1 = right hand, M2 = left
++; hand, M1+M2 = both hands (two-handed weapons, or the same item in both hands). Either input is listed when
++; both work (one-handed weapons, spells, shouts, powers, torches, shields). Body armor shows no hint because
++; its worn state is not tracked. With a gamepad the configured buttons are shown (default RB / LB).
++EquipHint=1
  ; Adds a school-specific jewel-coloured underline to magical medallions.
  ShowMagicSchoolAccents=1
  ; Optional labels shown above the wheel; customise freely (max 23 ASCII chars).
-@@ -145,12 +156,23 @@ FavoritesScanCode=16
+@@ -145,12 +162,23 @@ FavoritesScanCode=16
  ; KHA-OS panel pointer: 0=off, 1=draw one only while the Windows pointer is hidden
  ; (some overlays hide it), 2=always draw one.
  KhaosCursorMode=1
@@ -194,7 +200,7 @@ index e6a7506..a1d8420 100644
  GamepadOpenMask=9
  GamepadPreviousMask=0
 diff --git a/RunicWheelV011.cpp b/RunicWheelV011.cpp
-index b6457a3..0b56174 100644
+index b6457a3..41d8a75 100644
 --- a/RunicWheelV011.cpp
 +++ b/RunicWheelV011.cpp
 @@ -172,6 +172,11 @@ static int g_fontVertexCount=0;
@@ -239,7 +245,7 @@ index b6457a3..0b56174 100644
  static rw21::Pending g_advancedPending{};
  static int g_enableAdvancedEditor=1,g_showEditorHelp=1,g_showWheelControlsGuide=1,g_showWheelOccupancy=1,g_quickSectorKeys=0;
  static int g_showAllStackPreviews=1,g_showStackPositionDots=1;
-+static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2; // v0.27
++static int g_stackMini3D=1,g_showEquippedHighlight=1,g_equippedBadgeMode=2,g_showEquipHint=1; // v0.27
 +static volatile Long g_lastInputDevice=1; // 1 mouse/keyboard, 2 gamepad: picks the M1/M2 or RB/LB wording
  static volatile Long g_editorDisplay=0; // code for visible status, never a TESV pointer
  static int g_clearArmedWheel=-1,g_clearArmedSector=-1;
@@ -278,17 +284,18 @@ index b6457a3..0b56174 100644
      }
      const bool scroll=formType==0x17;
      if(kind!=rw05::Weapon && kind!=rw05::Armor && kind!=rw05::Consumable && kind!=rw05::Ammo && kind!=rw05::Torch && !scroll){
-@@ -1436,6 +1460,9 @@ void load_config(){
+@@ -1436,6 +1460,10 @@ void load_config(){
      g_showNextPreview=value("ShowNextItemPreview",1,0,1);
      g_showAllStackPreviews=value("ShowAllStackPreviews",1,0,1);
      g_showStackPositionDots=value("ShowStackPositionDots",1,0,1);
 +    g_stackMini3D=value("StackMiniature3D",1,0,1);
 +    g_showEquippedHighlight=value("ShowEquippedHighlight",1,0,1);
 +    g_equippedBadgeMode=value("EquippedInputBadge",2,0,2);
++    g_showEquipHint=value("EquipHint",1,0,1);
      g_magicSchoolAccents=value("ShowMagicSchoolAccents",1,0,1);
      // Never steal Skyrim's F2-F5 keys, even when a legacy INI requests it.
      if(g_itemPreviousKey>=0x3C && g_itemPreviousKey<=0x3F)g_itemPreviousKey=0;
-@@ -1685,6 +1712,22 @@ void advanced_action(unsigned gesture,bool primary){
+@@ -1685,6 +1713,22 @@ void advanced_action(unsigned gesture,bool primary){
         "RunicWheelLE: ADVANCED EDIT armed/cancelled/refused (no TESV mutation)\r\n");
  }
  
@@ -311,7 +318,7 @@ index b6457a3..0b56174 100644
  void edit_click(bool remove){
      if(!inventory_context())return;
      // Never consume an old hovered item from another menu or expired frame.
-@@ -1717,6 +1760,7 @@ void edit_click(bool remove){
+@@ -1717,6 +1761,7 @@ void edit_click(bool remove){
          "RunicWheelLE: EDIT remove from selected slot\r\n":
          "RunicWheelLE: EDIT add hovered item to selected slot\r\n");}
      else file_log("RunicWheelLE: edit refused (no item, duplicate or sector full)\r\n");
@@ -319,7 +326,7 @@ index b6457a3..0b56174 100644
  }
  
  static bool resolve_saved_form(unsigned saved,unsigned* out,void* context){
-@@ -1739,7 +1783,7 @@ void save_impl(SKSESerializationInterface* serial){
+@@ -1739,7 +1784,7 @@ void save_impl(SKSESerializationInterface* serial){
          file_log("RunicWheelLE: SKSE co-save write FAILED\r\n");
      else file_log("RunicWheelLE: SKSE co-save record WRITTEN\r\n");
      unsigned char previewRecord[8+kFormPreviewBytes];
@@ -328,7 +335,7 @@ index b6457a3..0b56174 100644
          DWord cachedForm=0;AcquireSRWLockShared(&g_previewDataLock);
          cachedForm=g_formPreviewPixelForms[cache];
          if(cachedForm){
-@@ -1760,7 +1804,7 @@ void save_impl(SKSESerializationInterface* serial){
+@@ -1760,7 +1805,7 @@ void save_impl(SKSESerializationInterface* serial){
  void load_impl(SKSESerializationInterface* serial){
      if(!serial||!serial->GetNextRecordInfo||!serial->ReadRecordData)return;
      AcquireSRWLockExclusive(&g_previewDataLock);
@@ -337,7 +344,7 @@ index b6457a3..0b56174 100644
      ReleaseSRWLockExclusive(&g_previewDataLock);
      InterlockedExchange(&g_previewCacheClearPixels,0);InterlockedExchange(&g_previewCacheResetPending,1);
      UInt32 record=0,version=0,length=0;
-@@ -1772,10 +1816,10 @@ void load_impl(SKSESerializationInterface* serial){
+@@ -1772,10 +1817,10 @@ void load_impl(SKSESerializationInterface* serial){
              const DWord saved=rw04::get32(previewRecord),bytes=rw04::get32(previewRecord+4);
              unsigned mapped=0;if(!saved||bytes!=kFormPreviewBytes||!resolve_saved_form(saved,&mapped,serial)||!mapped)continue;
              AcquireSRWLockExclusive(&g_previewDataLock);
@@ -352,7 +359,7 @@ index b6457a3..0b56174 100644
                  for(unsigned b=0;b<kFormPreviewBytes;++b)g_formPreviewPixels[target][b]=previewRecord[8+b];
                  g_formPreviewPixelForms[target]=mapped;
              }
-@@ -1798,7 +1842,7 @@ void load_impl(SKSESerializationInterface* serial){
+@@ -1798,7 +1843,7 @@ void load_impl(SKSESerializationInterface* serial){
  void revert_impl(SKSESerializationInterface*){
      queue_state(g_defaultState);
      AcquireSRWLockExclusive(&g_previewDataLock);
@@ -361,7 +368,7 @@ index b6457a3..0b56174 100644
      ReleaseSRWLockExclusive(&g_previewDataLock);
      InterlockedExchange(&g_previewCacheClearPixels,1);InterlockedExchange(&g_previewCacheResetPending,1);
      file_log("RunicWheelLE: SKSE co-save REVERT requested\r\n");
-@@ -1840,20 +1884,28 @@ void change_visible(bool visible){
+@@ -1840,20 +1885,28 @@ void change_visible(bool visible){
          file_log(visible?"RunicWheelLE: input -> wheel OPEN\r\n":"RunicWheelLE: input -> wheel CLOSED\r\n");
      }
  }
@@ -395,7 +402,7 @@ index b6457a3..0b56174 100644
      bool was=g_activation.visible;
      bool now=rw02::button(g_activation,down,GetTickCount(),(unsigned)g_cfg.holdMs);
      if(!was && now){g_mouseX=g_mouseY=0;InterlockedExchange(&g_renderLogged,0);rw20::reset(g_scrollEdges);
-@@ -1862,7 +1914,7 @@ void activate(bool down,bool mouseOpenButton){
+@@ -1862,7 +1915,7 @@ void activate(bool down,bool mouseOpenButton){
      if(was!=now)change_visible(now);
      if(!was && now){
          InterlockedExchange(&g_refreshNeeded,1);
@@ -404,7 +411,7 @@ index b6457a3..0b56174 100644
      }
  }
  void close_wheel(){
-@@ -1896,8 +1948,11 @@ int layout_scancode(char c,int fallback){
+@@ -1896,8 +1949,11 @@ int layout_scancode(char c,int fallback){
  // Return true when an event must not reach vanilla gameplay.
  void open_khaos_from_wheel();
  int khaos_capture_input(InputEvent* event);
@@ -416,7 +423,7 @@ index b6457a3..0b56174 100644
      // Foreground ownership is checked BEFORE modal configuration capture.
      // KHA-OS cannot starve Skyrim/Windows if another window gains focus.
      if(g_window && GetForegroundWindow()!=g_window){
-@@ -1910,6 +1965,7 @@ int process_event(InputEvent* event){
+@@ -1910,6 +1966,7 @@ int process_event(InputEvent* event){
      }
      if(g_khaosOpen){
          if(khaos_capture_input(event))return 1;
@@ -424,7 +431,7 @@ index b6457a3..0b56174 100644
          // TAB toggles the KHA-OS modal while it is already open; consume it so
          // the same press cannot open Skyrim's TweenMenu behind the modal.
          if(event->type==0 && event->device==0){
-@@ -1950,7 +2006,7 @@ int process_event(InputEvent* event){
+@@ -1950,7 +2007,7 @@ int process_event(InputEvent* event){
          // unchanged; no hidden edit toggle, undo or save interception.
          if(key && b->scan>=0x3C && b->scan<=0x3F)return 0;
          if((mouse && b->scan==(DWord)g_cfg.openMouse) || (key && g_cfg.keyboardOpen && b->scan==(DWord)g_cfg.keyboardOpen) || (pad && b->scan==(DWord)g_cfg.padOpen)){
@@ -433,7 +440,16 @@ index b6457a3..0b56174 100644
          }
          // Wheel pulses are not ordinary held mouse buttons in the LE dispatcher.
          // Some input paths report a nonzero timer or a zero analogue value;
-@@ -2399,7 +2455,7 @@ void release_theme(){
+@@ -2280,7 +2337,7 @@ static const Glyph kGlyphs[]={
+  {'?',{14,17,1,2,4,0,4}},{' ',{0,0,0,0,0,0,0}}
+ };
+ static int g_labelVert=0;
+-static Vertex g_quantityLabels[8*96];
++static Vertex g_quantityLabels[8*96+256]; // v0.27: room for the equipped badges and the EQUIP hint on a full wheel
+ static int g_quantityLabelVert=0;
+ void text_at(float midX,float capMid,float width,float fontPx,const char* raw,DWord col);
+ void text_in(float midX,float boxY,float boxH,float width,float fontPx,const char* raw,DWord col,float fill=.62f);
+@@ -2399,7 +2456,7 @@ void release_theme(){
      drop(g_frameAtlas);g_frameAtlas=nullptr;
      drop(g_fontAtlas);g_fontAtlas=nullptr;
      drop(g_plaqueAtlas);g_plaqueAtlas=nullptr;
@@ -442,7 +458,7 @@ index b6457a3..0b56174 100644
      g_formPreviewDevice=nullptr;g_formPreviewNext=0;
      g_atlasOwner=nullptr;g_iconAtlasChecked=0;
  }
-@@ -2491,6 +2547,116 @@ void add_art_icon(float x,float y,unsigned id,float selected,float outer){
+@@ -2491,6 +2548,171 @@ void add_art_icon(float x,float y,unsigned id,float selected,float outer){
  }
  // The early main-medallion pass MUST NOT carry a miniature: background quads are
  // drawn later and used to cover it. The miniatures live in their own late pass.
@@ -537,29 +553,84 @@ index b6457a3..0b56174 100644
 +    equip_disc(cx,cy,r,tinted(0x30dbba7du));
 +    equip_disc(cx,cy,r*.86f,tinted(0x38c9a455u));
 +}
-+// Input marker at the lower-left of the art: the hand(s) the item is equipped in, or the shout key.
-+void draw_equipped_badge(float x,float y,float art,unsigned m){
++// Name of the input that drives a hand: M1/M2 with mouse and keyboard, the configured buttons with a gamepad.
++const char* hand_input_name(bool right){
 +    const bool pad=InterlockedCompareExchange(&g_lastInputDevice,0,0)==2;
-+    char t[24]{};
-+    if(m&4u)cat_text(t,sizeof t,"SHOUT");
-+    else{
-+        const char* rightName=pad?pad_button_name(g_cfg.padPrimary):"M1";
-+        const char* leftName=pad?pad_button_name(g_cfg.padSecondary):"M2";
-+        if((m&3u)==3u){cat_text(t,sizeof t,rightName);cat_text(t,sizeof t,"+");cat_text(t,sizeof t,leftName);}
-+        else cat_text(t,sizeof t,(m&2u)?rightName:leftName);
-+    }
++    return pad?pad_button_name(right?g_cfg.padPrimary:g_cfg.padSecondary):(right?"M1":"M2");
++}
++// Black plate with white letters (the look of the quantity label), readable over any highlight.
++// (x,y) is the top-left corner; returns the plate width.
++float draw_input_chip(float x,float y,const char* t){
 +    unsigned len=0;while(t[len])++len;
 +    const float h=24.f,w=14.f+9.5f*(float)len;
-+    const float bx=x-art*.5f,by=y+art*.5f-h*.9f;
-+    quantity_rect(bx,by,w,h,tinted(0xe6121c26u));
-+    quantity_rect(bx,by,w,2.f,tinted(0xffdbba7du));
-+    if(g_fontAtlas)text_in(bx+w*.5f,by+3.f,h-3.f,w-4.f,15.f,t,0xfff4e3b4u);
-+    else draw_text(bx+4.f,by+7.f,1.6f,t,0xfff4e3b4u);
++    quantity_rect(x,y,w,h,tinted(0xf2000000u));
++    if(g_fontAtlas)text_in(x+w*.5f,y+3.f,h-3.f,w-4.f,15.f,t,0xffffffffu);
++    else draw_text(x+4.f,y+7.f,1.6f,t,0xffffffffu);
++    return w;
++}
++// Marker at the lower-left of the art of an equipped slot: the hand(s) it is equipped in, or SHOUT.
++void draw_equipped_badge(float x,float y,float art,unsigned m){
++    char t[24]{};
++    if(m&4u)cat_text(t,sizeof t,"SHOUT");
++    else if((m&3u)==3u){cat_text(t,sizeof t,hand_input_name(true));cat_text(t,sizeof t,"+");cat_text(t,sizeof t,hand_input_name(false));}
++    else cat_text(t,sizeof t,hand_input_name((m&2u)!=0));
++    draw_input_chip(x-art*.5f,y+art*.5f-24.f*.9f,t);
++}
++// ---- selected-slot hint: what the next press does (EQUIP / UNEQUIP) and which input does it --------
++struct EquipHint{bool valid;bool unequip;unsigned inputs;}; // inputs: 1 right-hand input, 2 left-hand input, 4 both hands
++EquipHint equip_hint(const rw05::Binding& b,unsigned iconId){
++    EquipHint h{false,false,0u};
++    if(!b.formId||!g_equippedNow.valid)return h; // state unknown: say nothing rather than guess
++    const unsigned m=equipped_mask(b,iconId);
++    const unsigned held=m&3u;
++    const bool voice=(m&4u)!=0;
++    const unsigned heldInputs=held==3u?4u:(held==2u?1u:2u);
++    const bool twoHanded=b.kind==rw05::Weapon&&(iconId==rw14::Greatsword||iconId==rw14::Warhammer||iconId==rw14::Bow||iconId==rw14::Crossbow);
++    if(b.kind==rw05::Weapon||(b.kind==rw05::Consumable&&iconId==rw14::Scroll)){
++        // The hand matters: M1 = right, M2 = left (the same weapon moves to the other hand if pressed there).
++        h.valid=true;
++        if(held){h.unequip=true;h.inputs=heldInputs;}else h.inputs=twoHanded?4u:3u;
++    }else if(b.kind==rw05::Spell){
++        h.valid=true;
++        if(held){h.unequip=true;h.inputs=heldInputs;}
++        else{h.unequip=voice;h.inputs=3u;}
++    }else if(b.kind==rw05::Shout){
++        h.valid=true;h.unequip=voice;h.inputs=3u;      // the hand is irrelevant: either input
++    }else if(b.kind==rw05::Torch){
++        h.valid=true;h.unequip=held!=0;h.inputs=3u;
++    }else if(b.kind==rw05::Armor){
++        if(held){h.valid=true;h.unequip=true;h.inputs=3u;}   // a shield held in a hand
++        else if(iconId==rw14::Shield){h.valid=true;h.inputs=3u;}
++        // body armor: worn state is not tracked, so no hint
++    }
++    return h;
++}
++void draw_equip_hint(float cx,float top,const EquipHint& h){
++    const float boxW=156.f,boxH=34.f;
++    quantity_rect(cx-boxW*.5f,top,boxW,boxH,tinted(h.unequip?0xf0731820u:0xf01f6f37u)); // dark red / green
++    const char* title=h.unequip?"UNEQUIP":"EQUIP";
++    if(g_fontAtlas)text_in(cx,top+3.f,boxH-3.f,boxW-14.f,21.f,title,0xffffffffu);
++    else draw_text(cx-60.f,top+8.f,2.4f,title,0xffffffffu);
++    const char* chip[2]={nullptr,nullptr};int n=0;
++    char both[24]{};
++    if(h.inputs&4u){
++        cat_text(both,sizeof both,hand_input_name(true));cat_text(both,sizeof both,"+");cat_text(both,sizeof both,hand_input_name(false));
++        chip[n++]=both;
++    }else{
++        if(h.inputs&1u)chip[n++]=hand_input_name(true);
++        if(h.inputs&2u)chip[n++]=hand_input_name(false);
++    }
++    const float gap=4.f;float total=0.f;
++    for(int i=0;i<n;++i){unsigned len=0;while(chip[i][len])++len;total+=14.f+9.5f*(float)len;}
++    total+=gap*(float)(n>0?n-1:0);
++    float x=cx-total*.5f;
++    const float y=top+boxH+3.f;                       // close under the message
++    for(int i=0;i<n;++i)x+=draw_input_chip(x,y,chip[i])+gap;
 +}
  void add_mini_art_icon(float x,float y,unsigned id,float outer,bool selected){
      if(!g_iconAtlas || g_miniArtVert+6>8*6)return;
      if(id>=rw14::Count)id=rw14::Misc;
-@@ -2669,6 +2835,9 @@ Nameplate nameplate(float width,float height,float cx,float cy,float outer,const
+@@ -2669,6 +2891,9 @@ Nameplate nameplate(float width,float height,float cx,float cy,float outer,const
  void draw_labels(float width,float height){
      g_labelVert=0;g_quantityLabelVert=0;g_artVertexCount=0;g_miniArtVert=0;g_miniCount=0;g_fontVertexCount=0;
      for(int i=0;i<8;++i)g_formPreviewSectorCache[i]=-1;
@@ -569,7 +640,7 @@ index b6457a3..0b56174 100644
      const float d=width<height?width:height;
      float outer=d*.31f*(float)g_cfg.wheelScale/100.f;
      if(outer>440.f)outer=440.f; if(outer>height*.44f)outer=height*.44f;
-@@ -2788,6 +2957,7 @@ void draw_labels(float width,float height){
+@@ -2788,6 +3013,7 @@ void draw_labels(float width,float height){
          const rw05::Binding& b=slot.item[index];
          const float x=cx+ux*outer*.66f,y=cy+uy*outer*.66f;
          const bool active=selected==sector;
@@ -577,7 +648,7 @@ index b6457a3..0b56174 100644
          const DWord accent=b.kind==rw05::Weapon?0xffffd69au:
            b.kind==rw05::Armor?0xffc0e0ffu:b.kind==rw05::Spell?0xffc9b8ffu:
            b.kind==rw05::Consumable?0xff98edc7u:b.kind==rw05::Ammo?0xffffe4a4u:0xffe2cee8u;
-@@ -2802,7 +2972,7 @@ void draw_labels(float width,float height){
+@@ -2802,7 +3028,7 @@ void draw_labels(float width,float height){
          }
          if(g_iconAtlas && g_firstThemeEnabled){
          int cacheSlot=-1;
@@ -586,7 +657,7 @@ index b6457a3..0b56174 100644
              const bool hasItemPreview=b.kind!=rw05::Spell&&cacheSlot>=0&&g_formPreviewTextures[cacheSlot];
              const unsigned iconId=g_iconIndices[wheel][sector][index];
              float visibleIconSize=outer*.398f;
-@@ -2821,8 +2991,10 @@ void draw_labels(float width,float height){
+@@ -2821,8 +3047,10 @@ void draw_labels(float width,float height){
              }
              if(hasItemPreview){
                  int outlineQuad=sector*6;
@@ -599,7 +670,7 @@ index b6457a3..0b56174 100644
              }
              if(g_showNextPreview && slot.count>1 && (g_showAllStackPreviews || active)){
                  const unsigned next=rw20::preview_index(index,slot.count);
-@@ -2832,7 +3004,19 @@ void draw_labels(float width,float height){
+@@ -2832,7 +3060,19 @@ void draw_labels(float width,float height){
                  const float bx=x+off,by=y+off*.80f;
                  const float r=outer*(active?.100f:.090f);
                  (void)r;
@@ -620,7 +691,7 @@ index b6457a3..0b56174 100644
                  if(g_showStackPositionDots){
                      for(unsigned dot=0;dot<slot.count;++dot){
                          const float dx=bx-((float)slot.count-1.f)*5.0f+(float)dot*10.f;
-@@ -2846,6 +3030,10 @@ void draw_labels(float width,float height){
+@@ -2846,6 +3086,10 @@ void draw_labels(float width,float height){
              mark_quad(x-32.f,y+27.f,64.f,3.f,tinted(accent));
              draw_category_icon(x,y-6.f,(rw05::Kind)b.kind,accent);
          }
@@ -631,7 +702,49 @@ index b6457a3..0b56174 100644
          const Long available= g_inventoryQuantities[wheel][sector][index];
          if(available>=0&&b.kind!=rw05::Weapon&&b.kind!=rw05::Armor&&b.kind!=rw05::Spell&&b.kind!=rw05::Shout){
              char amount[12]{};unsigned value=(unsigned)available;int digits=0;char reversed[10]{};
-@@ -2974,6 +3162,9 @@ void apply_presentation(float width,float height){
+@@ -2928,6 +3172,14 @@ void draw_labels(float width,float height){
+              (InterlockedCompareExchange(&g_menuFlags,0,0)&3)?"HOVER ITEM AND LEFT CLICK":"CHOOSE AN OCCUPIED SECTOR",0xff8fa7b6u);
+     }
+     const float feedbackFade=rw16::feedback_alpha(g_presentationNow,(DWord)InterlockedCompareExchange(&g_feedbackTick,0,0),(unsigned)g_cfg.feedbackDuration);
++    // v0.27: persistent EQUIP / UNEQUIP hint for the selected slot, never in the add/edit (Inventory/Magic) menus.
++    EquipHint equipHint{false,false,0u};
++    if(g_showEquipHint&&!(InterlockedCompareExchange(&g_menuFlags,0,0)&3)&&selection.formId){
++        const rw05::Slot& hintSlot=g_model.slot[wheel][selected];
++        const unsigned hintIndex=g_model.cursor[wheel][selected]<hintSlot.count?g_model.cursor[wheel][selected]:0;
++        equipHint=equip_hint(selection,g_iconIndices[wheel][selected][hintIndex]);
++    }
++    bool transientShown=false;
+     if(feedbackFade>0.f){
+         const int code=(int)InterlockedCompareExchange(&g_feedback,0,0);
+         const char* msg=code==1?"ADDED":code==2?"REMOVED":code==3?"EQUIP?":code==4?"REFUSED":code==5?"USE?":code==6?"UNEQUIP?":code==7?"QUEUED":code==8?"EAT N/A":code==9?"NEXT ITEM":
+@@ -2943,7 +3195,10 @@ void draw_labels(float width,float height){
+             rw19::caption(stackMsg,sizeof(stackMsg),"ITEM",g_model.cursor[wheel][selected],picked.count);
+             msg=stackMsg;
+         }
++        // The late "EQUIP?"/"UNEQUIP?" flash is replaced by the persistent hint where the hint exists.
++        if((code==3||code==6)&&equipHint.valid)msg=nullptr;
+         if(msg){
++            transientShown=true;
+             const float rise=g_reduceMotion?0.f:4.f*(1.f-feedbackFade);
+             const float fy=cy+outer*.38f-rise;
+             mark_quad(cx-112.f,fy,224.f,50.f,tinted(rw16::with_alpha(0xe0182830u,feedbackFade)));
+@@ -2952,6 +3207,15 @@ void draw_labels(float width,float height){
+             else draw_text(cx-89.f,fy+7.f,3.65f,msg,rw16::with_alpha(0xffaef4c3u,feedbackFade));
+         }
+     }
++    if(equipHint.valid&&!transientShown){
++        // Same anchor as the transient messages, but never lower than the top of the bottom slot's art
++        // (slots sit at .66*outer with art about .17*outer around them), so a small wheel does not overlap it.
++        const float hintBlockH=34.f+3.f+24.f;
++        float hintTop=cy+outer*.38f;
++        const float hintMax=cy+outer*.45f-hintBlockH;
++        if(hintTop>hintMax)hintTop=hintMax;
++        draw_equip_hint(cx,hintTop,equipHint);
++    }
+ }
+ 
+ void apply_to_vertex(Vertex& v,float cx,float cy,float scale,float opacity){
+@@ -2974,6 +3238,9 @@ void apply_presentation(float width,float height){
      for(int i=0;i<g_labelVert;++i)apply_to_vertex(g_labels[i],cx,cy,scale,opacity);
      for(int i=0;i<g_quantityLabelVert;++i)apply_to_vertex(g_quantityLabels[i],cx,cy,scale,opacity);
      for(int i=0;i<g_artVertexCount;++i)apply_to_vertex(g_artQuads[i],cx,cy,scale,opacity);
@@ -641,7 +754,7 @@ index b6457a3..0b56174 100644
      for(int sector=0;sector<8;++sector)if(g_formPreviewSectorCache[sector]>=0)
          for(int i=sector*6;i<sector*6+6;++i){apply_to_vertex(g_formPreviewQuads[i],cx,cy,scale,opacity);apply_to_vertex(g_formPreviewOutlineQuads[i],cx,cy,scale,opacity);}
      for(int i=0;i<6;++i){apply_to_vertex(g_frameQuads[i],cx,cy,scale,opacity);
-@@ -3061,11 +3252,11 @@ Raw create_preview_outline_texture(Raw device,const unsigned char* pixels){
+@@ -3061,11 +3328,11 @@ Raw create_preview_outline_texture(Raw device,const unsigned char* pixels){
  void restore_cached_form_previews(Raw device){
      if(!device)return;
      if(g_formPreviewDevice!=device){
@@ -655,7 +768,7 @@ index b6457a3..0b56174 100644
          unsigned char pixels[kFormPreviewBytes];DWord form=0;
          AcquireSRWLockShared(&g_previewDataLock);
          form=g_formPreviewPixelForms[i];
-@@ -3172,15 +3363,18 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord
+@@ -3172,15 +3439,18 @@ int cache_surface_preview(Raw device,Raw surface,DWord width,DWord height,DWord
      }
      reinterpret_cast<SurfaceUnlock>(get(surface,14))(surface);
      if(g_formPreviewDevice!=device){
@@ -678,7 +791,7 @@ index b6457a3..0b56174 100644
      bool persistedPixels=false;
      LockedRectangle copySrc{};
      if(succeeded(reinterpret_cast<TextureLock>(get(texture,kLockTexture))(texture,0,&copySrc,nullptr,0))&&
-@@ -3264,9 +3458,11 @@ void prepare_inventory_preview_capture(){
+@@ -3264,9 +3534,11 @@ void prepare_inventory_preview_capture(){
      if(!formId||!seen||GetTickCount()-seen>1500u)return;
      if(!g_previewBackupSurface||g_previewBackupDevice!=g_device)return;
      if(!inventory3d_model_matches(formId)){
@@ -692,7 +805,7 @@ index b6457a3..0b56174 100644
          }
          return;
      }
-@@ -3277,6 +3473,7 @@ void prepare_inventory_preview_capture(){
+@@ -3277,6 +3549,7 @@ void prepare_inventory_preview_capture(){
      if(succeeded(hr))hr=reinterpret_cast<ColorFill>(get(g_device,kColorFill))
          (g_device,back,nullptr,0xFFFF00FFu);
      if(succeeded(hr)){
@@ -700,7 +813,7 @@ index b6457a3..0b56174 100644
          InterlockedExchange(&g_previewClearActive,1);
          file_log("RunicWheelLE: after Scaleform, frame saved and cleared; vanilla Inventory3DManager render follows\r\n");
      }else{
-@@ -3313,7 +3510,7 @@ void finish_inventory_preview_capture(Raw device){
+@@ -3313,7 +3586,7 @@ void finish_inventory_preview_capture(Raw device){
          // A save transition cancelled this request while the inventory model was rendering.
      }else if(captureReady&&InterlockedCompareExchange(&g_previewCapturePending,0,0)&&
          cache_surface_preview(device,captured,desc.width,desc.height,desc.format,
@@ -709,7 +822,7 @@ index b6457a3..0b56174 100644
          InterlockedExchange(&g_previewCapturePending,0);
          file_log("RunicWheelLE: compact FormID thumbnail cached in memory; original screen restored and no image file written\r\n");
      }else if(InterlockedIncrement(&g_previewCaptureAttempts)>=3){
-@@ -3323,7 +3520,7 @@ void finish_inventory_preview_capture(Raw device){
+@@ -3323,7 +3596,7 @@ void finish_inventory_preview_capture(Raw device){
      drop(captured);drop(back);
  }
  void clear_form_preview_cache(){
@@ -718,7 +831,7 @@ index b6457a3..0b56174 100644
          Raw texture=g_formPreviewTextures[i];Raw outline=g_formPreviewOutlineTextures[i];
          g_formPreviewTextures[i]=nullptr;g_formPreviewForms[i]=0;
          g_formPreviewOutlineTextures[i]=nullptr;drop(texture);drop(outline);
-@@ -3331,16 +3528,16 @@ void clear_form_preview_cache(){
+@@ -3331,16 +3604,16 @@ void clear_form_preview_cache(){
      g_formPreviewDevice=nullptr;g_formPreviewNext=0;
      if(InterlockedExchange(&g_previewCacheClearPixels,0)){
          AcquireSRWLockExclusive(&g_previewDataLock);
@@ -738,7 +851,7 @@ index b6457a3..0b56174 100644
          ReleaseSRWLockExclusive(&g_previewDataLock);
      }
      file_log("RunicWheelLE: preview cache reset faulted; remaining thumbnails will be ignored\r\n");
-@@ -3617,6 +3814,7 @@ int draw(Raw device){
+@@ -3617,6 +3890,7 @@ int draw(Raw device){
      } __finally {ReleaseSRWLockShared(&g_catalogLock);}
      ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_sectorCount*2),g_geometry,sizeof(Vertex)));
      if(ok && triangles>0)ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)triangles,g_pips,sizeof(Vertex)));
@@ -746,7 +859,7 @@ index b6457a3..0b56174 100644
      // Draw order: translucent sectors -> ornamental frame -> independent icons
      // -> geometrical caption backgrounds -> Unicode text. All state restored.
      if(ok && g_frameAtlas && g_showDecorativeFrame)ok=draw_textured_pass(device,g_frameAtlas,g_frameQuads,2);
-@@ -3640,6 +3838,11 @@ int draw(Raw device){
+@@ -3640,6 +3914,11 @@ int draw(Raw device){
          if(cacheSlot>=0&&g_formPreviewTextures[cacheSlot])
              ok=draw_textured_pass(device,g_formPreviewTextures[cacheSlot],&g_formPreviewQuads[sector*6],2);
      }
@@ -758,7 +871,7 @@ index b6457a3..0b56174 100644
      if(ok&&g_quantityLabelVert>0)
          ok=succeeded(reinterpret_cast<DrawUp>(get(device,kDrawUP))(device,4,(UInit)(g_quantityLabelVert/3),g_quantityLabels,sizeof(Vertex)));
      if(ok && g_fontAtlas && g_fontVertexCount)ok=draw_textured_pass(device,g_fontAtlas,g_fontQuads,(UInit)(g_fontVertexCount/3));
-@@ -3795,6 +3998,7 @@ void open_khaos_from_wheel(){
+@@ -3795,6 +4074,7 @@ void open_khaos_from_wheel(){
      if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);return;}
      khaos_begin_session();
      g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
@@ -766,7 +879,7 @@ index b6457a3..0b56174 100644
      g_khaosMouseX=g_khaosMouseY=-1.f;g_khaosSeedPointer=1;
      InterlockedExchange(&g_khaosOpen,1);InterlockedExchange(&g_visible,0);
      InterlockedExchange(&g_exitArmed,0);InterlockedExchange(&g_resetInput,1);schedule_time_reconcile();
-@@ -3821,6 +4025,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
+@@ -3821,6 +4101,7 @@ KHAOS_ABI void KHAOS_ToggleMenu(){
      if(g_khaosOpen){InterlockedExchange(&g_khaosOpen,0);file_log("RunicWheelLE: KHAOS menu closed\r\n");return;}
      khaos_begin_session();
      g_khaosCursorMode=value("KhaosCursorMode",2,0,2);
